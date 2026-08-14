@@ -51,7 +51,11 @@ OUTPUT_DIR = Path("n490_graph_statistics")
 
 VOLTAGE_LEVELS = [220, 300, 380]
 
+BASE_FONTSIZE = plt.rcParams["font.size"] * 1.50
 
+DELAUNAY_ANALYSIS_DIR = Path(
+    "n490_delaunay_overlap_analysis"
+)
 
 
 # ---------------------------------------------------------------------
@@ -350,183 +354,195 @@ def calculate_line_to_mst_length_ratio(
 
     return pd.DataFrame(rows)
 
+def build_final_statistics_summary(
+    statistics: pd.DataFrame,
+    length_statistics: pd.DataFrame,
+    edge_fit: dict,
+    length_fit: dict,
+    empirical_delaunay_path: Path,
+    delaunay_132_path: Path,
+) -> pd.DataFrame:
+    """
+    Combine empirical N490 statistics with fitted 132 kV estimates.
+
+    The 220, 300, and 380 kV rows use measured N490 values throughout.
+
+    The 132 kV row uses:
+    - exponential-fit estimates for MST/Delaunay overlap proportions,
+    - linear-fit extrapolation for lines per bus,
+    - linear-fit extrapolation for total-line-length / MST-length ratio.
+    """
+    empirical_delaunay = pd.read_pickle(
+        empirical_delaunay_path
+    )
+
+    overlap_132 = pd.read_pickle(
+        delaunay_132_path
+    )
+
+    delaunay_columns = [
+        "Vbase",
+        "MST",
+        "Delaunay1",
+        "Delaunay2",
+        "Delaunay3",
+    ]
+
+    # -------------------------------------------------------------
+    # Empirical 220/300/380 Delaunay statistics
+    # -------------------------------------------------------------
+    empirical_delaunay = (
+        empirical_delaunay[
+            delaunay_columns
+        ]
+        .copy()
+    )
+
+    # -------------------------------------------------------------
+    # Fitted 132 kV Delaunay statistics
+    # -------------------------------------------------------------
+    overlap_132 = (
+        overlap_132[
+            delaunay_columns
+        ]
+        .copy()
+    )
+
+    delaunay_all = pd.concat(
+        [
+            overlap_132,
+            empirical_delaunay,
+        ],
+        ignore_index=True,
+    )
+
+    # -------------------------------------------------------------
+    # Empirical line-count statistic
+    # -------------------------------------------------------------
+    graph_stats = statistics[
+        [
+            "Vbase",
+            "lines_per_bus",
+        ]
+    ].copy()
+
+    # -------------------------------------------------------------
+    # Empirical length/MST statistic
+    # -------------------------------------------------------------
+    length_stats = length_statistics[
+        [
+            "Vbase",
+            "line_to_mst_length_ratio",
+        ]
+    ].copy()
+
+    graph_stats = graph_stats.merge(
+        length_stats,
+        on="Vbase",
+        how="outer",
+        validate="one_to_one",
+    )
+
+    # -------------------------------------------------------------
+    # Add fitted 132 kV graph statistics
+    # -------------------------------------------------------------
+    row_132 = pd.DataFrame(
+        [
+            {
+                "Vbase": 132,
+                "line_to_mst_length_ratio": float(
+                    length_fit["extrapolated_value"]
+                ),
+                "lines_per_bus": float(
+                    edge_fit["extrapolated_value"]
+                ),
+            }
+        ]
+    )
+
+    graph_stats = pd.concat(
+        [
+            row_132,
+            graph_stats,
+        ],
+        ignore_index=True,
+    )
+
+    # -------------------------------------------------------------
+    # Final table
+    # -------------------------------------------------------------
+    summary = delaunay_all.merge(
+        graph_stats,
+        on="Vbase",
+        how="inner",
+        validate="one_to_one",
+    )
+
+    summary = (
+        summary[
+            [
+                "Vbase",
+                "MST",
+                "Delaunay1",
+                "Delaunay2",
+                "Delaunay3",
+                "line_to_mst_length_ratio",
+                "lines_per_bus",
+            ]
+        ]
+        .sort_values("Vbase")
+        .reset_index(drop=True)
+    )
+
+    return summary
+
 # ---------------------------------------------------------------------
 # Plot results
 # ---------------------------------------------------------------------
 
-def plot_lines_per_bus_fit(
-    statistics: pd.DataFrame,
-    extrapolate_to_kv: float = 132,
-) -> None:
+def fit_linear_voltage_series(
+    data: pd.DataFrame,
+    value_column: str,
+    extrapolate_to_kv: float = 132.0,
+) -> dict:
     """
-    Plot N490 lines per bus against voltage and add a linear regression fit.
+    Fit a linear relationship between voltage and one graph statistic.
 
-    The regression is fitted using the voltage levels present in
-    ``statistics`` and extrapolated downward to ``extrapolate_to_kv``.
+    The fitted model is
 
-    Parameters
-    ----------
-    statistics:
-        Summary table produced by ``calculate_line_bus_statistics()``.
-        Must contain ``Vbase`` and ``lines_per_bus``.
-    extrapolate_to_kv:
-        Lowest voltage to which the fitted line should be extrapolated.
+        y = slope * V + intercept
 
-    Returns
-    -------
-    None
-    """
-    required = {"Vbase", "lines_per_bus"}
-    missing = required - set(statistics.columns)
+    where V is voltage in kV.
 
-    if missing:
-        raise ValueError(
-            f"Statistics table is missing columns: {sorted(missing)}"
-        )
-
-    x = statistics["Vbase"].to_numpy(dtype=float)
-    y = statistics["lines_per_bus"].to_numpy(dtype=float)
-
-    if len(x) < 2:
-        raise ValueError(
-            "At least two voltage levels are required for a linear fit."
-        )
-
-    # -------------------------------------------------------------
-    # Linear least-squares fit: y = slope * V + intercept
-    # -------------------------------------------------------------
-    slope, intercept = np.polyfit(
-        x,
-        y,
-        deg=1,
-    )
-
-    x_fit = np.linspace(
-        float(extrapolate_to_kv),
-        float(x.max()),
-        200,
-    )
-
-    y_fit = slope * x_fit + intercept
-
-    # Predicted value at the extrapolation voltage.
-    extrapolated_value = (
-        slope * float(extrapolate_to_kv)
-        + intercept
-    )
-
-    # -------------------------------------------------------------
-    # Plot
-    # -------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    ax.scatter(
-        x,
-        y,
-        s=90,
-        zorder=3,
-        label="N490",
-    )
-
-    ax.plot(
-        x_fit,
-        y_fit,
-        linewidth=2.0,
-        label="Linear fit",
-    )
-
-    # Explicitly mark the extrapolated 132-kV estimate.
-    ax.scatter(
-        [extrapolate_to_kv],
-        [extrapolated_value],
-        s=90,
-        marker="x",
-        linewidths=2.0,
-        zorder=4,
-        label=f"{extrapolate_to_kv:g} kV extrapolation",
-    )
-
-    ax.set_xlabel("Voltage level (kV)")
-    ax.set_ylabel("Lines per bus")
-
-    ax.set_title(
-        "N490 lines per bus by voltage level"
-    )
-
-    ax.grid(
-        alpha=0.3,
-    )
-
-    ax.legend()
-
-    # Include the extrapolated voltage explicitly on the x axis.
-    voltage_ticks = sorted(
-        set(
-            [float(extrapolate_to_kv)]
-            + x.tolist()
-        )
-    )
-
-    ax.set_xticks(voltage_ticks)
-
-    plt.tight_layout()
-    plt.show()
-
-    # -------------------------------------------------------------
-    # Diagnostics
-    # -------------------------------------------------------------
-    print("\nLinear fit")
-    print("----------")
-    print(f"Slope:                 {slope:.6f} lines/bus/kV")
-    print(f"Intercept:             {intercept:.6f}")
-    print(
-        f"Predicted at "
-        f"{extrapolate_to_kv:g} kV:     "
-        f"{extrapolated_value:.4f} lines/bus"
-    )
-    
-def plot_line_to_mst_length_ratio_fit(
-    length_statistics: pd.DataFrame,
-    extrapolate_to_kv: float = 132,
-) -> None:
-    """
-    Plot N490 total-line-length / MST-length ratio against voltage and add
-    a linear regression fit.
-
-    The regression is fitted using the voltage levels present in
-    ``length_statistics`` and extrapolated downward to
+    R-squared and RMSE are calculated using only the empirical voltage
+    levels. The fitted relationship is then extrapolated downward to
     ``extrapolate_to_kv``.
 
     Parameters
     ----------
-    length_statistics:
-        Summary table produced by
-        ``calculate_line_to_mst_length_ratio()``. Must contain ``Vbase`` and
-        ``line_to_mst_length_ratio``.
+    data:
+        DataFrame containing ``Vbase`` and ``value_column``.
+    value_column:
+        Name of the statistic to fit.
     extrapolate_to_kv:
-        Lowest voltage to which the fitted line should be extrapolated.
+        Voltage at which to evaluate the extrapolated fitted value.
 
     Returns
     -------
-    None
+    dict
+        Dictionary containing the fitted parameters, goodness-of-fit
+        statistics, empirical data, and extrapolated value.
     """
-    required = {
-        "Vbase",
-        "line_to_mst_length_ratio",
-    }
-
-    missing = required - set(length_statistics.columns)
+    required = {"Vbase", value_column}
+    missing = required - set(data.columns)
 
     if missing:
         raise ValueError(
-            f"Length-statistics table is missing columns: {sorted(missing)}"
+            f"Input table is missing columns: {sorted(missing)}"
         )
 
-    x = length_statistics["Vbase"].to_numpy(dtype=float)
-
-    y = length_statistics[
-        "line_to_mst_length_ratio"
-    ].to_numpy(dtype=float)
+    x = data["Vbase"].to_numpy(dtype=float)
+    y = data[value_column].to_numpy(dtype=float)
 
     if len(x) < 2:
         raise ValueError(
@@ -542,104 +558,426 @@ def plot_line_to_mst_length_ratio_fit(
         deg=1,
     )
 
-    x_fit = np.linspace(
-        float(extrapolate_to_kv),
-        float(x.max()),
-        200,
+    y_pred = slope * x + intercept
+    residuals = y - y_pred
+
+    # -------------------------------------------------------------
+    # Goodness of fit
+    # -------------------------------------------------------------
+    ss_res = np.sum(
+        residuals ** 2
     )
 
-    y_fit = (
-        slope * x_fit
-        + intercept
+    ss_tot = np.sum(
+        (y - np.mean(y)) ** 2
     )
 
+    r_squared = (
+        1.0 - ss_res / ss_tot
+        if ss_tot > 0
+        else np.nan
+    )
+
+    rmse = float(
+        np.sqrt(
+            np.mean(
+                residuals ** 2
+            )
+        )
+    )
+
+    # -------------------------------------------------------------
+    # Extrapolated value
+    # -------------------------------------------------------------
     extrapolated_value = (
         slope * float(extrapolate_to_kv)
         + intercept
     )
 
-    # -------------------------------------------------------------
-    # Plot
-    # -------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(8, 6))
+    return {
+        "x": x,
+        "y": y,
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "r_squared": float(r_squared),
+        "rmse": rmse,
+        "extrapolate_to_kv": float(extrapolate_to_kv),
+        "extrapolated_value": float(extrapolated_value),
+    }
 
-    ax.scatter(
-        x,
-        y,
-        s=90,
-        zorder=3,
-        label="N490",
+
+def plot_graph_statistics_fits(
+    statistics: pd.DataFrame,
+    length_statistics: pd.DataFrame,
+    extrapolate_to_kv: float = 132.0,
+) -> tuple[dict, dict]:
+    """
+    Plot edges per node and total-line-length/MST-length ratio together.
+
+    Both statistics are fitted independently as linear functions of voltage.
+    Empirical observations are shown as filled circular markers and the
+    extrapolated value as an ``x`` marker of the same series color.
+
+    Parameters
+    ----------
+    statistics:
+        Output from ``calculate_line_bus_statistics()``.
+    length_statistics:
+        Output from ``calculate_line_to_mst_length_ratio()``.
+    extrapolate_to_kv:
+        Lowest voltage shown and voltage at which the fitted relationships
+        are extrapolated.
+
+    Returns
+    -------
+    edge_fit:
+        Fit results for edges per node.
+    length_fit:
+        Fit results for total line length divided by MST length.
+    """
+    # -------------------------------------------------------------
+    # Colors
+    # -------------------------------------------------------------
+    EDGE_COLOR = "#900069"
+    LENGTH_COLOR = "#5c7c22"
+    BLACK = "#000000"
+
+    # -------------------------------------------------------------
+    # Fit both statistics
+    # -------------------------------------------------------------
+    edge_fit = fit_linear_voltage_series(
+        data=statistics,
+        value_column="lines_per_bus",
+        extrapolate_to_kv=extrapolate_to_kv,
     )
 
+    length_fit = fit_linear_voltage_series(
+        data=length_statistics,
+        value_column="line_to_mst_length_ratio",
+        extrapolate_to_kv=extrapolate_to_kv,
+    )
+
+    # Common fitted-voltage range.
+    max_voltage = max(
+        edge_fit["x"].max(),
+        length_fit["x"].max(),
+    )
+
+    x_fit = np.linspace(
+        float(extrapolate_to_kv),
+        float(max_voltage),
+        300,
+    )
+
+    edge_y_fit = (
+        edge_fit["slope"] * x_fit
+        + edge_fit["intercept"]
+    )
+
+    length_y_fit = (
+        length_fit["slope"] * x_fit
+        + length_fit["intercept"]
+    )
+
+    # -------------------------------------------------------------
+    # Figure
+    # -------------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(9, 6)
+    )
+
+    # -------------------------------------------------------------
+    # Edges per node
+    # -------------------------------------------------------------
     ax.plot(
         x_fit,
-        y_fit,
-        linewidth=2.0,
-        label="Linear fit",
+        edge_y_fit,
+        color=EDGE_COLOR,
+        linewidth=2.2,
+        label="Edges per node",
+        zorder=2,
+    )
+
+    ax.scatter(
+        edge_fit["x"],
+        edge_fit["y"],
+        color=EDGE_COLOR,
+        s=75,
+        marker="o",
+        zorder=4,
     )
 
     ax.scatter(
         [extrapolate_to_kv],
-        [extrapolated_value],
+        [edge_fit["extrapolated_value"]],
+        color=EDGE_COLOR,
         s=90,
         marker="x",
-        linewidths=2.0,
+        linewidths=2.2,
+        zorder=5,
+    )
+    
+    # -------------------------------------------------------------
+    # Extrapolated-value labels at 132 kV
+    # -------------------------------------------------------------
+    
+    # Edges per node: place above the extrapolated point.
+    ax.annotate(
+        rf"{edge_fit['extrapolated_value']:.4f}",
+        xy=(
+            extrapolate_to_kv,
+            edge_fit["extrapolated_value"],
+        ),
+        xytext=(10, 13),
+        textcoords="offset points",
+        horizontalalignment="center",
+        verticalalignment="bottom",
+        color=EDGE_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+    
+    # Total length / MST: place to the right of the extrapolated point.
+    ax.annotate(
+        rf"{length_fit['extrapolated_value']:.4f}",
+        xy=(
+            extrapolate_to_kv,
+            length_fit["extrapolated_value"],
+        ),
+        xytext=(18, 0),
+        textcoords="offset points",
+        horizontalalignment="left",
+        verticalalignment="center",
+        color=LENGTH_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+
+    # -------------------------------------------------------------
+    # Total length / MST
+    # -------------------------------------------------------------
+    ax.plot(
+        x_fit,
+        length_y_fit,
+        color=LENGTH_COLOR,
+        linewidth=2.2,
+        label="Ratio: total length to MST",
+        zorder=2,
+    )
+
+    ax.scatter(
+        length_fit["x"],
+        length_fit["y"],
+        color=LENGTH_COLOR,
+        s=75,
+        marker="o",
         zorder=4,
-        label=f"{extrapolate_to_kv:g} kV extrapolation",
     )
 
-    ax.set_xlabel("Voltage level (kV)")
-
-    ax.set_ylabel(
-        "Total line length / MST length"
+    ax.scatter(
+        [extrapolate_to_kv],
+        [length_fit["extrapolated_value"]],
+        color=LENGTH_COLOR,
+        s=90,
+        marker="x",
+        linewidths=2.2,
+        zorder=5,
     )
 
-    ax.set_title(
-        "N490 total line length relative to MST length"
+    # -------------------------------------------------------------
+    # Axes
+    # -------------------------------------------------------------
+    ax.set_xlabel(
+        "Voltage level [kV]",
+        color=BLACK,
+        fontsize=BASE_FONTSIZE,
+    )
+    
+    ax.tick_params(
+        axis="both",
+        colors=BLACK,
+        labelsize=BASE_FONTSIZE,
     )
 
-    ax.grid(
-        alpha=0.3,
-    )
+    # Deliberately no y-axis label.
+    ax.set_ylabel("")
 
-    ax.legend()
+    # No title.
+    ax.set_title("")
 
+    # No grid.
+    ax.grid(False)
+
+    # Only primary x and y axis lines.
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax.spines["bottom"].set_color(BLACK)
+    ax.spines["left"].set_color(BLACK)
+
+    ax.spines["bottom"].set_linewidth(1.0)
+    ax.spines["left"].set_linewidth(1.0)
+
+    # Explicit voltage ticks including extrapolated 132 kV point.
     voltage_ticks = sorted(
         set(
             [float(extrapolate_to_kv)]
-            + x.tolist()
+            + edge_fit["x"].tolist()
+            + length_fit["x"].tolist()
         )
     )
 
     ax.set_xticks(
         voltage_ticks
     )
+    
+    # -------------------------------------------------------------
+    # Direct series labels at 300 kV
+    # -------------------------------------------------------------
+    edge_300 = statistics.loc[
+        statistics["Vbase"] == 300,
+        "lines_per_bus",
+    ].iloc[0]
+    
+    length_300 = length_statistics.loc[
+        length_statistics["Vbase"] == 300,
+        "line_to_mst_length_ratio",
+    ].iloc[0]
+    
+    ax.annotate(
+        "Edges per node",
+        xy=(300, edge_300),
+        xytext=(10, -12),
+        textcoords="offset points",
+        horizontalalignment="left",
+        verticalalignment="top",
+        color=EDGE_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+    
+    ax.annotate(
+        "Ratio: total length to MST",
+        xy=(300, length_300),
+        xytext=(-10, 12),
+        textcoords="offset points",
+        horizontalalignment="right",
+        verticalalignment="bottom",
+        color=LENGTH_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+
+
+    # -------------------------------------------------------------
+    # Fit-statistics annotations
+    #
+    # Edges-per-node statistics above length/MST statistics.
+    # Both are placed on the far right.
+    # -------------------------------------------------------------
+    edge_text = (
+        rf"$y={edge_fit['slope']:.5f}V"
+        rf"{edge_fit['intercept']:+.3f}$"
+        "\n"
+        rf"$R^2={edge_fit['r_squared']:.4f}$"
+        "\n"
+        rf"RMSE = {edge_fit['rmse']:.4f}"
+    )
+    
+    length_text = (
+        rf"$y={length_fit['slope']:.5f}V"
+        rf"{length_fit['intercept']:+.3f}$"
+        "\n"
+        rf"$R^2={length_fit['r_squared']:.4f}$"
+        "\n"
+        rf"RMSE = {length_fit['rmse']:.4f}"
+    )
+
+    ax.text(
+        0.98,
+        0.10,
+        edge_text,
+        transform=ax.transAxes,
+        horizontalalignment="right",
+        verticalalignment="bottom",
+        color=EDGE_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+
+    ax.text(
+        0.98,
+        0.68,
+        length_text,
+        transform=ax.transAxes,
+        horizontalalignment="right",
+        verticalalignment="top",
+        color=LENGTH_COLOR,
+        fontsize=BASE_FONTSIZE,
+    )
+
+    # Make all remaining standard text explicitly black.
+    ax.xaxis.label.set_color(BLACK)
+    ax.xaxis.label.set_fontsize(BASE_FONTSIZE)
+    
+    for tick in ax.get_xticklabels():
+        tick.set_color(BLACK)
+        tick.set_fontsize(BASE_FONTSIZE)
+    
+    for tick in ax.get_yticklabels():
+        tick.set_color(BLACK)
+        tick.set_fontsize(BASE_FONTSIZE)
 
     plt.tight_layout()
     plt.show()
 
     # -------------------------------------------------------------
-    # Diagnostics
+    # Console diagnostics
     # -------------------------------------------------------------
-    print("\nLinear fit: line length / MST length")
-    print("------------------------------------")
-
+    print("\nLinear fit: edges per node")
+    print("--------------------------")
     print(
         f"Slope:                 "
-        f"{slope:.6f} ratio/kV"
+        f"{edge_fit['slope']:.6f} edges/node/kV"
     )
-
     print(
         f"Intercept:             "
-        f"{intercept:.6f}"
+        f"{edge_fit['intercept']:.6f}"
     )
-
+    print(
+        f"R-squared:             "
+        f"{edge_fit['r_squared']:.6f}"
+    )
+    print(
+        f"RMSE:                  "
+        f"{edge_fit['rmse']:.6f}"
+    )
     print(
         f"Predicted at "
-        f"{extrapolate_to_kv:g} kV:     "
-        f"{extrapolated_value:.4f}"
+        f"{extrapolate_to_kv:g} kV:    "
+        f"{edge_fit['extrapolated_value']:.4f}"
     )
-    
+
+    print("\nLinear fit: total length / MST")
+    print("--------------------------------")
+    print(
+        f"Slope:                 "
+        f"{length_fit['slope']:.6f} ratio/kV"
+    )
+    print(
+        f"Intercept:             "
+        f"{length_fit['intercept']:.6f}"
+    )
+    print(
+        f"R-squared:             "
+        f"{length_fit['r_squared']:.6f}"
+    )
+    print(
+        f"RMSE:                  "
+        f"{length_fit['rmse']:.6f}"
+    )
+    print(
+        f"Predicted at "
+        f"{extrapolate_to_kv:g} kV:    "
+        f"{length_fit['extrapolated_value']:.4f}"
+    )
+
+    return edge_fit, length_fit
 
 # ---------------------------------------------------------------------
 # Main
@@ -695,16 +1033,11 @@ def main() -> None:
         f"\n  {OUTPUT_DIR / 'N490_line_mst_length_statistics.pkl'}"
     )
     
-    plot_lines_per_bus_fit(
+    edge_fit, length_fit = plot_graph_statistics_fits(
         statistics=statistics,
-        extrapolate_to_kv=132,
-    )
-    
-    plot_line_to_mst_length_ratio_fit(
         length_statistics=length_statistics,
         extrapolate_to_kv=132,
     )
-
     print("\n")
     print("=" * 72)
     print("N490 line-to-bus statistics by voltage")
@@ -720,16 +1053,55 @@ def main() -> None:
         )
         .to_string(index=False)
     )
-
-    statistics.to_pickle(
-        OUTPUT_DIR
-        / "N490_line_bus_statistics.pkl"
+    
+    # -------------------------------------------------------------
+    # Final combined statistics summary
+    # -------------------------------------------------------------
+    final_summary = build_final_statistics_summary(
+        statistics=statistics,
+        length_statistics=length_statistics,
+        edge_fit=edge_fit,
+        length_fit=length_fit,
+        empirical_delaunay_path=(
+            DELAUNAY_ANALYSIS_DIR
+            / "N490_Delaunay_stats_by_voltage.pkl"
+        ),
+        delaunay_132_path=(
+            DELAUNAY_ANALYSIS_DIR
+            / "N490_Delaunay_132kv_estimate.pkl"
+        ),
     )
-
+    
+    print("\n")
+    print("=" * 96)
+    print("N490 summary statistics")
+    print("=" * 96)
+    
+    print(
+        final_summary
+        .round(
+            {
+                "MST": 4,
+                "Delaunay1": 4,
+                "Delaunay2": 4,
+                "Delaunay3": 4,
+                "line_to_mst_length_ratio": 4,
+                "lines_per_bus": 4,
+            }
+        )
+        .to_string(index=False)
+    )
+    
+    final_summary.to_pickle(
+        OUTPUT_DIR
+        / "N490_summary_statistics.pkl"
+    )
+    
     print(
         "\nSaved:"
-        f"\n  {OUTPUT_DIR / 'N490_line_bus_statistics.pkl'}"
+        f"\n  {OUTPUT_DIR / 'N490_summary_statistics.pkl'}"
     )
+
 
 
 if __name__ == "__main__":

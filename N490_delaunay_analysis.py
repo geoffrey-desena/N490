@@ -70,6 +70,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import LineString
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 from nordic490 import N490
 
@@ -915,62 +916,6 @@ def build_wide_statistics(
         .reset_index(drop=True)
     )
 
-def build_average_overlap_statistics(
-    stats_by_voltage: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Calculate the mean overlap proportion across voltage levels for each
-    mutually exclusive Delaunay/MST category.
-
-    Parameters
-    ----------
-    stats_by_voltage:
-        Wide-form voltage-specific overlap statistics produced by
-        ``build_wide_statistics()``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per edge-set category containing the mean overlap
-        proportion and percentage across all analyzed voltage levels.
-    """
-    categories = [
-        "MST",
-        "Delaunay1",
-        "Delaunay2",
-        "Delaunay3",
-        "Delaunay4",
-        "Delaunay5",
-    ]
-
-    labels = {
-        "MST": "MST",
-        "Delaunay1": "Delaunay",
-        "Delaunay2": "Delaunay 2",
-        "Delaunay3": "Delaunay 3",
-        "Delaunay4": "Delaunay 4",
-        "Delaunay5": "Delaunay 5",
-    }
-
-    rows = []
-
-    for category in categories:
-        mean_proportion = float(
-            stats_by_voltage[category].mean()
-        )
-
-        rows.append(
-            {
-                "edge_set": labels[category],
-                "average_proportion": mean_proportion,
-                "average_percentage": 100.0 * mean_proportion,
-            }
-        )
-
-    averages = pd.DataFrame(rows)
-
-    return averages
-
 
 def print_voltage_summary(
     classified: gpd.GeoDataFrame,
@@ -1054,6 +999,66 @@ def print_voltage_summary(
         f"MST:                             "
         f"{mst_count:4d}  ({mst_share:.4f})"
     )
+    
+def build_132kv_overlap_estimate(
+    fit: dict,
+    voltage_kv: int = 132,
+) -> pd.DataFrame:
+    """
+    Estimate Delaunay/MST overlap proportions for the synthetic 132 kV
+    network from the common fitted exponential relationship.
+
+    The model is
+
+        p(k) = A * exp(-lambda * k)
+
+    with:
+
+        k = 0   MST
+        k = 1   Delaunay1
+        k = 2   Delaunay2
+        k = 3   Delaunay3
+        k = 4   Delaunay4
+        k = 5   Delaunay5
+
+    Parameters
+    ----------
+    fit:
+        Dictionary returned by ``fit_overlap_exponential()``.
+    voltage_kv:
+        Voltage level represented by the extrapolated overlap ratios.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Single-row table containing the estimated overlap proportions.
+    """
+    A = float(fit["A"])
+    lambda_ = float(fit["lambda"])
+
+    row = {
+        "Vbase": int(voltage_kv),
+        "MST": float(
+            A * np.exp(-lambda_ * 0)
+        ),
+        "Delaunay1": float(
+            A * np.exp(-lambda_ * 1)
+        ),
+        "Delaunay2": float(
+            A * np.exp(-lambda_ * 2)
+        ),
+        "Delaunay3": float(
+            A * np.exp(-lambda_ * 3)
+        ),
+        "Delaunay4": float(
+            A * np.exp(-lambda_ * 4)
+        ),
+        "Delaunay5": float(
+            A * np.exp(-lambda_ * 5)
+        ),
+    }
+
+    return pd.DataFrame([row])
 
 
 # ---------------------------------------------------------------------
@@ -1246,14 +1251,184 @@ def main() -> None:
     # Plot overlap proportions by voltage
     # ---------------------------------------------------------------------
     
+    def fit_overlap_exponential(
+        stats_by_voltage: pd.DataFrame,
+    ) -> dict:
+        """
+        Fit one exponential decay curve to the overlap proportions from all
+        voltage levels simultaneously and calculate goodness-of-fit statistics.
+    
+        Model
+        -----
+            p(k) = A * exp(-lambda * k)
+    
+        where:
+    
+            k = 0   MST
+            k = 1   Delaunay-1
+            ...
+            k = 5   Delaunay-5
+    
+        Returns
+        -------
+        dict
+            Fitted parameters and goodness-of-fit statistics.
+        """
+        categories = [
+            "MST",
+            "Delaunay1",
+            "Delaunay2",
+            "Delaunay3",
+            "Delaunay4",
+            "Delaunay5",
+        ]
+    
+        k_values = np.arange(
+            len(categories),
+            dtype=float,
+        )
+    
+        x_data = []
+        y_data = []
+    
+        for _, row in stats_by_voltage.iterrows():
+            for k, category in zip(k_values, categories):
+                x_data.append(k)
+                y_data.append(float(row[category]))
+    
+        x_data = np.asarray(x_data, dtype=float)
+        y_data = np.asarray(y_data, dtype=float)
+    
+        def exponential(k, A, lambda_):
+            return A * np.exp(-lambda_ * k)
+    
+        # -------------------------------------------------------------
+        # Nonlinear least-squares fit
+        # -------------------------------------------------------------
+        parameters, covariance = curve_fit(
+            exponential,
+            x_data,
+            y_data,
+            p0=(0.6, 1.0),
+            bounds=(
+                [0.0, 0.0],
+                [1.0, np.inf],
+            ),
+        )
+    
+        A, lambda_ = parameters
+    
+        # -------------------------------------------------------------
+        # Predictions and residuals
+        # -------------------------------------------------------------
+        y_pred = exponential(
+            x_data,
+            A,
+            lambda_,
+        )
+    
+        residuals = y_data - y_pred
+    
+        ss_res = np.sum(
+            residuals ** 2
+        )
+    
+        ss_tot = np.sum(
+            (y_data - np.mean(y_data)) ** 2
+        )
+    
+        r_squared = (
+            1.0 - ss_res / ss_tot
+        )
+    
+        # -------------------------------------------------------------
+        # Adjusted R-squared
+        # -------------------------------------------------------------
+        n = len(y_data)
+        p = 2  # A and lambda
+    
+        adjusted_r_squared = (
+            1.0
+            - (1.0 - r_squared)
+            * (n - 1)
+            / (n - p - 1)
+        )
+    
+        # -------------------------------------------------------------
+        # RMSE
+        #
+        # This is in proportions, so multiply by 100 for percentage
+        # points.
+        # -------------------------------------------------------------
+        rmse = np.sqrt(
+            np.mean(residuals ** 2)
+        )
+    
+        rmse_percentage_points = (
+            100.0 * rmse
+        )
+    
+        # -------------------------------------------------------------
+        # Parameter standard errors and approximate 95% CIs
+        # -------------------------------------------------------------
+        standard_errors = np.sqrt(
+            np.diag(covariance)
+        )
+    
+        A_se = float(
+            standard_errors[0]
+        )
+    
+        lambda_se = float(
+            standard_errors[1]
+        )
+    
+        A_ci = (
+            float(A - 1.96 * A_se),
+            float(A + 1.96 * A_se),
+        )
+    
+        lambda_ci = (
+            float(lambda_ - 1.96 * lambda_se),
+            float(lambda_ + 1.96 * lambda_se),
+        )
+    
+        return {
+            "A": float(A),
+            "lambda": float(lambda_),
+    
+            "A_se": A_se,
+            "lambda_se": lambda_se,
+    
+            "A_ci_lower": A_ci[0],
+            "A_ci_upper": A_ci[1],
+    
+            "lambda_ci_lower": lambda_ci[0],
+            "lambda_ci_upper": lambda_ci[1],
+    
+            "r_squared": float(r_squared),
+            "adjusted_r_squared": float(adjusted_r_squared),
+    
+            "rmse": float(rmse),
+            "rmse_percentage_points": float(
+                rmse_percentage_points
+            ),
+    
+            "n_observations": int(n),
+        }
+
     def plot_overlap_statistics(
         stats_by_voltage: pd.DataFrame,
-    ) -> None:
+    ) -> tuple[float, float]:
         """
-        Plot N490 overlap-category proportions for each voltage level.
+        Plot overlap proportions by voltage together with a common exponential
+        decay fitted to all voltage series.
     
-        The plotted categories are mutually exclusive: MST, Delaunay-1
-        excluding MST, and Delaunay-2 through Delaunay-5.
+        A single exponential model,
+    
+            p(k) = A * exp(-lambda * k),
+    
+        is estimated using all three voltage-level series simultaneously.
     
         Parameters
         ----------
@@ -1263,7 +1438,10 @@ def main() -> None:
     
         Returns
         -------
-        None
+        A:
+            Fitted exponential amplitude.
+        lambda_:
+            Fitted exponential decay parameter.
         """
         categories = [
             "MST",
@@ -1283,9 +1461,10 @@ def main() -> None:
             "Delaunay 5",
         ]
     
-        fig, ax = plt.subplots(figsize=(10, 6))
-    
-        x = np.arange(len(categories))
+        x = np.arange(
+            len(categories),
+            dtype=float,
+        )
     
         markers = {
             220: "o",
@@ -1293,35 +1472,99 @@ def main() -> None:
             380: "^",
         }
     
+        # -------------------------------------------------------------
+        # Fit common exponential decay.
+        # -------------------------------------------------------------
+        fit = fit_overlap_exponential(
+            stats_by_voltage
+        )
+        
+        A = fit["A"]
+        lambda_ = fit["lambda"]
+        
+        # Smooth x values for plotting the fitted curve.
+        x_fit = np.linspace(
+            0.0,
+            float(x.max()),
+            300,
+        )
+    
+        y_fit = (
+            100.0
+            * A
+            * np.exp(
+                -lambda_ * x_fit
+            )
+        )
+    
+        # -------------------------------------------------------------
+        # Plot measured voltage-specific series.
+        # -------------------------------------------------------------
+        fig, ax = plt.subplots(
+            figsize=(10, 6)
+        )
+    
         for _, row in stats_by_voltage.iterrows():
     
-            voltage_kv = int(row["Vbase"])
+            voltage_kv = int(
+                row["Vbase"]
+            )
     
             percentages = [
-                100.0 * float(row[category])
+                100.0 * float(
+                    row[category]
+                )
                 for category in categories
             ]
     
             ax.plot(
                 x,
                 percentages,
-                marker=markers.get(voltage_kv, "o"),
+                marker=markers.get(
+                    voltage_kv,
+                    "o",
+                ),
                 markersize=9,
                 linewidth=2.0,
                 label=f"{voltage_kv} kV",
             )
     
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels)
+        # -------------------------------------------------------------
+        # Common fitted exponential.
+        # -------------------------------------------------------------
+        ax.plot(
+            x_fit,
+            y_fit,
+            linestyle="--",
+            linewidth=2.2,
+            color="black",
+            label=(
+                "Exponential fit "
+                rf"($\lambda={lambda_:.3f}$)"
+            ),
+        )
     
-        ax.set_xlabel("Edge set")
-        ax.set_ylabel("Percentage overlap (%)")
+        ax.set_xticks(x)
+    
+        ax.set_xticklabels(
+            labels
+        )
+    
+        ax.set_xlabel(
+            "Edge set"
+        )
+    
+        ax.set_ylabel(
+            "Percentage overlap (%)"
+        )
     
         ax.set_title(
             "N490 overlap with voltage-specific Delaunay edge sets"
         )
     
-        ax.set_ylim(bottom=0)
+        ax.set_ylim(
+            bottom=0
+        )
     
         ax.grid(
             axis="y",
@@ -1332,8 +1575,86 @@ def main() -> None:
             title="Voltage level"
         )
     
+        # -------------------------------------------------------------
+        # Display fitted model on the figure.
+        # -------------------------------------------------------------
+        fit_text = (
+            r"$p(k)=A e^{-\lambda k}$"
+            "\n"
+            rf"$A={A:.3f}$"
+            "\n"
+            rf"$\lambda={lambda_:.3f}$"
+            "\n"
+            rf"$R^2={fit['r_squared']:.3f}$"
+            "\n"
+            rf"RMSE = {fit['rmse_percentage_points']:.2f} pp"
+        )
+    
+        ax.text(
+            0.98,
+            0.72,
+            fit_text,
+            transform=ax.transAxes,
+            horizontalalignment="right",
+            verticalalignment="top",
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.85,
+            },
+        )
+    
         plt.tight_layout()
         plt.show()
+    
+        # -------------------------------------------------------------
+        # Diagnostics.
+        # -------------------------------------------------------------
+        print("\nExponential overlap fit")
+        print("-----------------------")
+        
+        print(
+            "Model:                  "
+            "p(k) = A * exp(-lambda * k)"
+        )
+        
+        print(
+            f"A:                      "
+            f"{fit['A']:.6f}"
+        )
+        
+        print(
+            f"lambda:                 "
+            f"{fit['lambda']:.6f}"
+        )
+        
+        print(
+            f"lambda 95% CI:          "
+            f"[{fit['lambda_ci_lower']:.6f}, "
+            f"{fit['lambda_ci_upper']:.6f}]"
+        )
+        
+        print(
+            f"R-squared:              "
+            f"{fit['r_squared']:.6f}"
+        )
+        
+        print(
+            f"Adjusted R-squared:     "
+            f"{fit['adjusted_r_squared']:.6f}"
+        )
+        
+        print(
+            f"RMSE:                   "
+            f"{fit['rmse_percentage_points']:.3f} percentage points"
+        )
+        
+        print(
+            f"Observations:           "
+            f"{fit['n_observations']}"
+        )
+        
+        return fit
 
     # -------------------------------------------------------------
     # Combined branch-level non-geographic table.
@@ -1385,36 +1706,32 @@ def main() -> None:
         .to_string(index=False)
     )
     
-    plot_overlap_statistics(
+    overlap_fit = plot_overlap_statistics(
         stats_by_voltage
     )
     
     # -------------------------------------------------------------
-    # Average overlap statistics across voltage levels
+    # Estimated 132 kV overlap statistics
     # -------------------------------------------------------------
-    average_stats = build_average_overlap_statistics(
-        stats_by_voltage
+    overlap_132 = build_132kv_overlap_estimate(
+        fit=overlap_fit,
+        voltage_kv=132,
     )
     
     print("\n")
     print("=" * 72)
-    print("Average N490 Delaunay overlap across voltage levels")
+    print("Estimated 132 kV Delaunay overlap statistics")
     print("=" * 72)
     
     print(
-        average_stats
-        .round(
-            {
-                "average_proportion": 4,
-                "average_percentage": 2,
-            }
-        )
+        overlap_132
+        .round(4)
         .to_string(index=False)
     )
     
-    average_stats.to_pickle(
+    overlap_132.to_pickle(
         OUTPUT_DIR
-        / "N490_Delaunay_averages.pkl"
+        / "N490_Delaunay_132kv_estimate.pkl"
     )
 
 
