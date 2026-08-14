@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "n490_300kv_delaunay3_removed_land",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "voltage_kv": 300.0, "from_node": 2, "to_node": 14, "length_km": 90.422993630210996, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 5.262451, 59.225853 ], [ 6.008148, 58.513066 ] ] } }
+]
+}
