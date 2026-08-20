@@ -496,6 +496,386 @@ def build_final_statistics_summary(
 
     return summary
 
+
+def _resolve_line_endpoint_columns(
+    lines: pd.DataFrame,
+) -> tuple[str, str]:
+    """
+    Identify the two bus-endpoint columns in the N490 line table.
+
+    Returns
+    -------
+    tuple[str, str]
+        Names of the from-bus and to-bus columns.
+    """
+    candidate_pairs = [
+        ("bus0", "bus1"),
+        ("from_bus", "to_bus"),
+        ("from_bus_id", "to_bus_id"),
+        ("bus1", "bus2"),
+        ("fbus", "tbus"),
+        ("from", "to"),
+    ]
+
+    for from_col, to_col in candidate_pairs:
+        if from_col in lines.columns and to_col in lines.columns:
+            return from_col, to_col
+
+    raise ValueError(
+        "Could not identify line endpoint columns.\n"
+        f"Available line columns are:\n{lines.columns.tolist()}\n\n"
+        "Add the appropriate endpoint-column pair to "
+        "_resolve_line_endpoint_columns()."
+    )
+
+
+def _resolve_bus_ids(
+    buses: pd.DataFrame,
+    endpoint_values: pd.Index,
+) -> pd.Series:
+    """
+    Determine which bus identifier corresponds to the line endpoint values.
+
+    First tries the DataFrame index, then common bus-ID column names.
+    """
+    endpoint_values = pd.Index(
+        pd.Series(endpoint_values)
+        .dropna()
+        .unique()
+    )
+
+    # Most convenient case: line endpoints refer directly to bus index.
+    if endpoint_values.isin(buses.index).all():
+        return pd.Series(
+            buses.index,
+            index=buses.index,
+            name="bus_id",
+        )
+
+    candidate_columns = [
+        "bus",
+        "bus_id",
+        "Bus",
+        "BusID",
+        "id",
+        "ID",
+    ]
+
+    for column in candidate_columns:
+        if column not in buses.columns:
+            continue
+
+        bus_ids = buses[column]
+
+        if endpoint_values.isin(
+            pd.Index(bus_ids.dropna().unique())
+        ).all():
+            return pd.Series(
+                bus_ids.to_numpy(),
+                index=buses.index,
+                name="bus_id",
+            )
+
+    raise ValueError(
+        "Could not match line endpoint identifiers to N490 buses.\n"
+        f"Bus columns are:\n{buses.columns.tolist()}"
+    )
+
+
+def calculate_nodal_degrees(
+    buses: pd.DataFrame,
+    lines: pd.DataFrame,
+    voltage_levels: list[int] = VOLTAGE_LEVELS,
+) -> pd.DataFrame:
+    """
+    Calculate the nodal degree of every N490 bus at each voltage level.
+
+    Each AC branch contributes one degree to each terminal bus.
+    Parallel transmission lines therefore contribute independently.
+
+    Buses with no incident lines are retained with degree zero.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per bus containing:
+
+        - ``Vbase``
+        - ``bus_id``
+        - ``degree``
+    """
+    if "Vbase" not in buses.columns:
+        raise ValueError(
+            "N490 bus table does not contain 'Vbase'."
+        )
+
+    if "Vbase" not in lines.columns:
+        raise ValueError(
+            "N490 line table does not contain 'Vbase'."
+        )
+
+    from_col, to_col = _resolve_line_endpoint_columns(
+        lines
+    )
+
+    endpoint_values = pd.Index(
+        pd.concat(
+            [
+                lines[from_col],
+                lines[to_col],
+            ],
+            ignore_index=True,
+        )
+    )
+
+    bus_ids = _resolve_bus_ids(
+        buses=buses,
+        endpoint_values=endpoint_values,
+    )
+
+    bus_voltage = pd.to_numeric(
+        buses["Vbase"],
+        errors="coerce",
+    )
+
+    line_voltage = pd.to_numeric(
+        lines["Vbase"],
+        errors="coerce",
+    )
+
+    rows = []
+
+    for voltage_kv in voltage_levels:
+
+        # ---------------------------------------------------------
+        # Buses belonging to this voltage network
+        # ---------------------------------------------------------
+        bus_mask = np.isclose(
+            bus_voltage,
+            float(voltage_kv),
+            equal_nan=False,
+        )
+
+        voltage_bus_ids = bus_ids.loc[
+            bus_mask
+        ]
+
+        if voltage_bus_ids.empty:
+            raise ValueError(
+                f"No N490 buses found at {voltage_kv} kV."
+            )
+
+        # ---------------------------------------------------------
+        # Lines belonging to this voltage network
+        # ---------------------------------------------------------
+        line_mask = np.isclose(
+            line_voltage,
+            float(voltage_kv),
+            equal_nan=False,
+        )
+
+        voltage_lines = lines.loc[
+            line_mask,
+            [from_col, to_col],
+        ]
+
+        if voltage_lines.empty:
+            raise ValueError(
+                f"No N490 lines found at {voltage_kv} kV."
+            )
+
+        # ---------------------------------------------------------
+        # Every occurrence of a bus as a line endpoint contributes
+        # one to that bus's nodal degree.
+        # ---------------------------------------------------------
+        endpoints = pd.concat(
+            [
+                voltage_lines[from_col],
+                voltage_lines[to_col],
+            ],
+            ignore_index=True,
+        )
+
+        degrees = (
+            endpoints
+            .value_counts()
+            .astype(int)
+        )
+
+        rows.extend(
+            {
+                "Vbase": int(voltage_kv),
+                "bus_id": bus_id,
+                "degree": int(degree),
+            }
+            for bus_id, degree in degrees.items()
+        )
+
+    result = pd.DataFrame(rows)
+
+    # -------------------------------------------------------------
+    # Sanity check:
+    #
+    # sum(degree) must equal 2 * number of branches at each voltage.
+    # -------------------------------------------------------------
+    for voltage_kv in voltage_levels:
+        degree_sum = int(
+            result.loc[
+                result["Vbase"] == voltage_kv,
+                "degree",
+            ].sum()
+        )
+
+        n_lines = int(
+            np.isclose(
+                line_voltage,
+                float(voltage_kv),
+                equal_nan=False,
+            ).sum()
+        )
+
+        expected = 2 * n_lines
+
+        if degree_sum != expected:
+            raise RuntimeError(
+                f"Nodal-degree check failed at {voltage_kv} kV: "
+                f"sum(degree)={degree_sum}, "
+                f"but 2 * n_lines={expected}."
+            )
+
+    return result
+
+
+def calculate_degree_distribution(
+    nodal_degrees: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Convert bus-level nodal degrees into a degree-frequency distribution.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns:
+
+        - ``Vbase``
+        - ``degree``
+        - ``n_nodes``
+        - ``fraction_nodes``
+    """
+    distribution = (
+        nodal_degrees
+        .groupby(
+            ["Vbase", "degree"],
+            as_index=False,
+        )
+        .size()
+        .rename(
+            columns={
+                "size": "n_nodes",
+            }
+        )
+    )
+
+    distribution["fraction_nodes"] = (
+        distribution["n_nodes"]
+        / distribution.groupby("Vbase")["n_nodes"]
+        .transform("sum")
+    )
+
+    return distribution
+
+
+def plot_degree_distribution(
+    degree_distribution: pd.DataFrame,
+    output_dir: Path = OUTPUT_DIR,
+) -> None:
+    """
+    Plot and save the nodal-degree distribution for each voltage level.
+
+    Because degree is discrete, the plot uses one bar per integer degree.
+    """
+    voltage_levels = sorted(
+        degree_distribution["Vbase"].unique()
+    )
+
+    max_degree = int(
+        degree_distribution["degree"].max()
+    )
+
+    # -------------------------------------------------------------
+    # One figure per voltage level
+    # -------------------------------------------------------------
+    for voltage_kv in voltage_levels:
+
+        data = (
+            degree_distribution.loc[
+                degree_distribution["Vbase"]
+                == voltage_kv
+            ]
+            .set_index("degree")
+            .reindex(
+                range(0, max_degree + 1),
+                fill_value=0,
+            )
+            .reset_index()
+        )
+
+        fig, ax = plt.subplots(
+            figsize=(8, 5.5)
+        )
+
+        ax.bar(
+            data["degree"],
+            data["n_nodes"],
+            width=0.8,
+        )
+
+        ax.set_xlabel(
+            "Nodal degree",
+            fontsize=BASE_FONTSIZE,
+        )
+
+        ax.set_ylabel(
+            "Number of nodes",
+            fontsize=BASE_FONTSIZE,
+        )
+
+        ax.set_xticks(
+            range(0, max_degree + 1)
+        )
+
+        ax.tick_params(
+            axis="both",
+            labelsize=BASE_FONTSIZE,
+        )
+
+        ax.grid(False)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        plt.tight_layout()
+
+        figure_path = (
+            output_dir
+            / f"N490_{voltage_kv}kv_nodal_degree_distribution.png"
+        )
+
+        fig.savefig(
+            figure_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+        plt.show()
+        plt.close(fig)
+
+        print(
+            f"Saved:\n  {figure_path}"
+        )
+        
+        
+
 # ---------------------------------------------------------------------
 # Plot results
 # ---------------------------------------------------------------------
@@ -1004,6 +1384,56 @@ def main() -> None:
     
     length_statistics = calculate_line_to_mst_length_ratio(
         lines=lines,
+    )
+    
+    # -------------------------------------------------------------
+    # Nodal-degree distributions
+    # -------------------------------------------------------------
+    nodal_degrees = calculate_nodal_degrees(
+        buses=buses,
+        lines=lines,
+    )
+    
+    degree_distribution = calculate_degree_distribution(
+        nodal_degrees
+    )
+    
+    
+    print("\n")
+    print("=" * 72)
+    print("N490 nodal-degree distribution by voltage")
+    print("=" * 72)
+    
+    print(
+        degree_distribution
+        .to_string(index=False)
+    )
+    
+    nodal_degrees.to_pickle(
+        OUTPUT_DIR
+        / "N490_nodal_degrees.pkl"
+    )
+    
+    degree_distribution.to_pickle(
+        OUTPUT_DIR
+        / "N490_nodal_degree_distribution.pkl"
+    )
+    
+    degree_distribution.to_csv(
+        OUTPUT_DIR
+        / "N490_nodal_degree_distribution.csv",
+        index=False,
+    )
+    
+    print(
+        "\nSaved:"
+        f"\n  {OUTPUT_DIR / 'N490_nodal_degrees.pkl'}"
+        f"\n  {OUTPUT_DIR / 'N490_nodal_degree_distribution.pkl'}"
+        f"\n  {OUTPUT_DIR / 'N490_nodal_degree_distribution.csv'}"
+    )
+    
+    plot_degree_distribution(
+        degree_distribution=degree_distribution,
     )
     
     print("\n")
