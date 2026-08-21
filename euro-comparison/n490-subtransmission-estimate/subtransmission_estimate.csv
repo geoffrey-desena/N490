@@ -1,0 +1,2 @@
+unweighted_C,unweighted_gamma,weighted_C,weighted_gamma,delta_C,delta_gamma,percent_shift_C,percent_shift_gamma,euclidean_shift,C_gamma_correlation,covariance_condition_number,voltage_tolerance,minimum_nodes,n_countries
+1.6599052480199645,2.3983730187246253,1.7080920825776729,2.2225277929820306,0.048186834557708336,-0.17584522574259465,2.9029870599655316,-7.3318547352614605,0.18232804074293132,-0.851978650539833,34.23143016758344,0.1,10,14

@@ -1,0 +1,17 @@
+file,size_kB,rows,columns,column_names,encoding,delimiter,duplicate_rows,missing_cells
+Albania.csv,1.736,174,3,1 | 2 | 400,utf-8-sig,"','",11,0
+Belgium.csv,8.155,665,3,271 | 206 | 150,utf-8-sig,"','",285,0
+Bosnia&Herzegovina.csv,3.04,259,3,174 | 182 | 110,utf-8-sig,"','",12,0
+Croatia.csv,4.256,357,3,15 | 68 | 110,utf-8-sig,"','",45,0
+Czechia.csv,12.47,1018,3,501 | 387 | 110,utf-8-sig,"','",223,0
+Denmark.csv,3.784,306,3,24 | 78 | 400,utf-8-sig,"','",27,0
+Estonia.csv,2.622,230,3,97 | 51 | 110,utf-8-sig,"','",30,0
+Hungary.csv,7.746,639,3,50 | 4 | 120,utf-8-sig,"','",122,0
+Ireland.csv,5.639,466,3,8 | 169 | 110,utf-8-sig,"','",40,0
+Latvia.csv,2.499,219,3,87 | 95 | 110,utf-8-sig,"','",22,0
+Lithuania.csv,3.903,328,3,228 | 150 | 110,utf-8-sig,"','",3,0
+Netherlands.csv,8.052,668,3,211 | 19 | 110,utf-8-sig,"','",234,0
+Portugal.csv,3.521,313,3,135 | 121 | 150,utf-8-sig,"','",77,0
+Slovakia.csv,5.372,456,3,151 | 48 | 110,utf-8-sig,"','",86,0
+Slovenia.csv,2.562,232,3,41 | 73 | 110,utf-8-sig,"','",38,0
+dataset_inventory.csv,1.132,16,9,file | size_kB | rows | columns | column_names | encoding | delimiter | duplicate_rows | missing_cells,utf-8-sig,"','",0,0

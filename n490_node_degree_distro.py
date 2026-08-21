@@ -1,29 +1,62 @@
 #!/usr/bin/env python3
-
 # -*- coding: utf-8 -*-
+
 """
-Fit exponential decay functions to Nordic490 nodal-degree distributions.
+N490 cumulative node-degree analysis
+====================================
 
-For each voltage-specific AC-line network (220, 300, and 380 kV):
+Fit exponential decay functions to Nordic490 complementary cumulative
+node-degree distributions.
 
-1. Construct nodal degrees directly from model.line endpoints.
-2. Calculate the empirical degree probability distribution P(k).
-3. Fit two exponential models:
+For each voltage-specific AC-line network:
 
-       Method 1:
-           P(k) = C * exp(-k / gamma)
+    - 220 kV
+    - 300 kV
+    - 380 kV
 
-       Method 2, following the form stated by Hartmann & Cirunay:
-           P(k) = (1 / gamma) * exp(-k / gamma)
+and for the aggregated line-only HV network:
 
-4. Calculate goodness-of-fit statistics.
-5. Plot the empirical degree distribution and both fitted functions.
-6. Print and save a summary of the fitted decay parameters.
+    - 220 + 300 + 380 kV
 
+the script:
+
+1. Constructs nodal degrees directly from model.line endpoints.
+2. Retains parallel lines as separate branches.
+3. Calculates the complementary cumulative degree distribution:
+
+       P(K >= k)
+
+4. Fits the exponential model:
+
+       P(K >= k) = C * exp(-k / gamma)
+
+   with both C and gamma fitted freely.
+
+5. Calculates R^2 and RMSE.
+6. Plots the empirical cumulative distribution together with the
+   fitted exponential curve.
+7. Prints a summary table containing:
+       network
+       voltage levels
+       number of nodes
+       number of lines
+       mean degree
+       C
+       gamma
+       R^2
+       RMSE
+8. Saves the summary table and empirical distributions.
+
+Notes
+-----
 Parallel lines are counted independently.
 
-Transformer-only buses that do not occur in model.line are not part of
-the line graph and therefore do not enter the degree distribution.
+Transformer-only buses are not part of these line graphs and therefore
+do not enter the degree distributions.
+
+The aggregated network is useful as a whole-network diagnostic, but
+its fitted parameters should not be interpreted as directly comparable
+to the individual voltage-layer fits.
 """
 
 from pathlib import Path
@@ -37,32 +70,17 @@ from scipy.optimize import curve_fit
 from nordic490 import N490
 
 
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
+# =====================================================================
+# CONFIGURATION
+# =====================================================================
 
 ANALYSIS_CASES = {
-    "220 kV": {
-        "voltage_levels": [220],
-        "include_transformers": False,
-    },
-    "300 kV": {
-        "voltage_levels": [300],
-        "include_transformers": False,
-    },
-    "380 kV": {
-        "voltage_levels": [380],
-        "include_transformers": False,
-    },
-    "Aggregated HV lines only": {
-        "voltage_levels": [220, 300, 380],
-        "include_transformers": False,
-    },
-    "Aggregated HV incl. transformers": {
-        "voltage_levels": [220, 300, 380],
-        "include_transformers": True,
-    },
+    "220 kV": [220],
+    "300 kV": [300],
+    "380 kV": [380],
+    "Aggregated HV lines": [220, 300, 380],
 }
+
 
 OUTPUT_DIR = Path(
     "n490_degree_decay_analysis"
@@ -73,22 +91,27 @@ OUTPUT_DIR.mkdir(
     exist_ok=True,
 )
 
+
+FIGSIZE = (8.5, 5.8)
+DPI = 300
+
 BASE_FONTSIZE = (
     plt.rcParams["font.size"]
     * 1.35
 )
 
 
-# ---------------------------------------------------------------------
-# Endpoint detection
-# ---------------------------------------------------------------------
+# =====================================================================
+# ENDPOINT DETECTION
+# =====================================================================
 
 def resolve_line_endpoint_columns(
     lines: pd.DataFrame,
 ) -> tuple[str, str]:
     """
-    Identify the two bus-endpoint columns in model.line.
+    Identify the two bus-endpoint columns in a branch table.
     """
+
     candidate_pairs = [
         ("bus0", "bus1"),
         ("from_bus", "to_bus"),
@@ -98,11 +121,15 @@ def resolve_line_endpoint_columns(
     ]
 
     for bus0_col, bus1_col in candidate_pairs:
+
         if (
             bus0_col in lines.columns
             and bus1_col in lines.columns
         ):
-            return bus0_col, bus1_col
+            return (
+                bus0_col,
+                bus1_col,
+            )
 
     raise ValueError(
         "Could not identify line endpoint columns.\n"
@@ -111,145 +138,89 @@ def resolve_line_endpoint_columns(
     )
 
 
-# ---------------------------------------------------------------------
-# Degree calculation
-# ---------------------------------------------------------------------
+# =====================================================================
+# SELECT LINES
+# =====================================================================
 
-def calculate_nodal_degrees(
+def select_lines_by_voltage(
     lines: pd.DataFrame,
-    trafos: pd.DataFrame | None = None,
-    voltage_levels: list[int] | None = None,
-    include_transformers: bool = False,
-) -> np.ndarray:
+    voltage_levels: list[int],
+) -> pd.DataFrame:
     """
-    Calculate nodal degrees from N490 branches.
-
-    Parameters
-    ----------
-    lines:
-        N490 model.line table.
-
-    trafos:
-        N490 model.trafo table. Required if include_transformers=True.
-
-    voltage_levels:
-        Voltage levels of model.line to include.
-
-        Examples
-        --------
-        [220]             -> 220 kV line network
-        [300]             -> 300 kV line network
-        [380]             -> 380 kV line network
-        [220, 300, 380]   -> aggregated line-only HV network
-        None              -> all model.line branches
-
-    include_transformers:
-        If True, transformer branches from model.trafo are added to
-        the graph as undirected edges.
-
-    Notes
-    -----
-    Each branch contributes one degree to each terminal bus.
-
-    Parallel lines and parallel transformers are counted separately.
+    Select model.line branches belonging to the requested voltage
+    levels.
     """
+
     if "Vbase" not in lines.columns:
+
         raise ValueError(
             "model.line does not contain 'Vbase'."
         )
 
-    line_bus0, line_bus1 = (
-        resolve_line_endpoint_columns(
-            lines
-        )
+    line_voltage = pd.to_numeric(
+        lines["Vbase"],
+        errors="coerce",
     )
 
-    # -------------------------------------------------------------
-    # Select AC lines
-    # -------------------------------------------------------------
-    if voltage_levels is None:
-        selected_lines = lines[
-            [line_bus0, line_bus1]
-        ].copy()
+    mask = np.zeros(
+        len(lines),
+        dtype=bool,
+    )
 
-    else:
-        line_voltage = pd.to_numeric(
-            lines["Vbase"],
-            errors="coerce",
+    for voltage_kv in voltage_levels:
+
+        mask |= np.isclose(
+            line_voltage,
+            float(voltage_kv),
+            equal_nan=False,
         )
 
-        line_mask = np.zeros(
-            len(lines),
-            dtype=bool,
-        )
+    selected = lines.loc[
+        mask
+    ].copy()
 
-        for voltage_kv in voltage_levels:
-            line_mask |= np.isclose(
-                line_voltage,
-                float(voltage_kv),
-                equal_nan=False,
-            )
+    if selected.empty:
 
-        selected_lines = lines.loc[
-            line_mask,
-            [line_bus0, line_bus1],
-        ].copy()
-
-    if selected_lines.empty:
         raise ValueError(
-            "No model.line branches found for requested "
-            "voltage levels."
+            "No model.line branches found for "
+            f"voltage levels {voltage_levels}."
         )
 
-    # -------------------------------------------------------------
-    # Collect line endpoints
-    # -------------------------------------------------------------
-    endpoint_series = [
-        selected_lines[line_bus0],
-        selected_lines[line_bus1],
-    ]
+    return selected
 
-    n_branches = len(
-        selected_lines
+
+# =====================================================================
+# DEGREE CALCULATION
+# =====================================================================
+
+def calculate_nodal_degrees(
+    lines: pd.DataFrame,
+    voltage_levels: list[int],
+) -> np.ndarray:
+    """
+    Calculate nodal degree for the requested N490 line network.
+
+    Every physical line row contributes one degree to each endpoint.
+
+    Parallel lines are therefore retained and counted independently.
+    """
+
+    selected_lines = select_lines_by_voltage(
+        lines=lines,
+        voltage_levels=voltage_levels,
     )
 
-    # -------------------------------------------------------------
-    # Optionally add transformers
-    # -------------------------------------------------------------
-    if include_transformers:
-
-        if trafos is None:
-            raise ValueError(
-                "trafos must be supplied when "
-                "include_transformers=True."
-            )
-
-        trafo_bus0, trafo_bus1 = (
-            resolve_line_endpoint_columns(
-                trafos
-            )
+    bus0_col, bus1_col = (
+        resolve_line_endpoint_columns(
+            selected_lines
         )
+    )
 
-        selected_trafos = trafos[
-            [trafo_bus0, trafo_bus1]
-        ].copy()
-
-        endpoint_series.extend(
-            [
-                selected_trafos[trafo_bus0],
-                selected_trafos[trafo_bus1],
-            ]
-        )
-
-        n_branches += len(
-            selected_trafos
-        )
-
-    # -------------------------------------------------------------
-    # Count endpoint occurrences
-    # -------------------------------------------------------------
     endpoints = pd.concat(
-        endpoint_series,
+        [
+            selected_lines[bus0_col],
+            selected_lines[bus1_col],
+        ],
         ignore_index=True,
     ).dropna()
 
@@ -263,71 +234,120 @@ def calculate_nodal_degrees(
     # -------------------------------------------------------------
     # Handshaking-lemma sanity check
     # -------------------------------------------------------------
+
     degree_sum = int(
         degrees.sum()
     )
 
-    expected = (
-        2 * n_branches
+    expected_degree_sum = (
+        2 * len(selected_lines)
     )
 
-    if degree_sum != expected:
+    if degree_sum != expected_degree_sum:
+
         raise RuntimeError(
             "Degree check failed: "
             f"sum(k)={degree_sum}, "
-            f"2E={expected}."
+            f"2E={expected_degree_sum}."
         )
 
     return degrees
 
-# ---------------------------------------------------------------------
-# Empirical PDF
-# ---------------------------------------------------------------------
 
-def calculate_degree_pdf(
+# =====================================================================
+# COMPLEMENTARY CUMULATIVE DEGREE DISTRIBUTION
+# =====================================================================
+
+def calculate_degree_ccdf(
     degrees: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     """
-    Calculate empirical P(k).
+    Calculate the complementary cumulative degree distribution:
+
+        P(K >= k)
+
+    for every integer degree from 1 through the maximum observed
+    degree.
 
     Returns
     -------
     k
-        Observed integer node degrees.
+        Integer degree values.
+
     counts
-        Number of nodes having each degree.
+        Number of nodes with degree >= k.
+
     probability
-        Fraction of nodes having each degree.
+        Fraction of nodes with degree >= k.
+
+    Notes
+    -----
+    By construction:
+
+        P(K >= 1) = 1
     """
-    k, counts = np.unique(
-        degrees,
-        return_counts=True,
+
+    if len(degrees) == 0:
+
+        return (
+            np.array([]),
+            np.array([]),
+            np.array([]),
+        )
+
+    max_degree = int(
+        np.max(degrees)
+    )
+
+    k = np.arange(
+        1,
+        max_degree + 1,
+        dtype=float,
+    )
+
+    counts = np.array(
+        [
+            np.sum(
+                degrees >= degree
+            )
+            for degree in k
+        ],
+        dtype=int,
     )
 
     probability = (
         counts
-        / counts.sum()
+        / len(degrees)
     )
 
     return (
-        k.astype(float),
-        counts.astype(int),
+        k,
+        counts,
         probability.astype(float),
     )
 
 
-# ---------------------------------------------------------------------
-# Exponential models
-# ---------------------------------------------------------------------
+# =====================================================================
+# EXPONENTIAL MODEL
+# =====================================================================
 
-def exponential_free(
+def exponential_ccdf(
     k: np.ndarray,
     C: float,
     gamma: float,
 ) -> np.ndarray:
     """
-    P(k) = C exp(-k / gamma)
+    Complementary cumulative exponential model:
+
+        P(K >= k) = C * exp(-k / gamma)
+
+    Both C and gamma are fitted freely.
     """
+
     return (
         C
         * np.exp(
@@ -336,34 +356,18 @@ def exponential_free(
     )
 
 
-def exponential_paper(
-    k: np.ndarray,
-    gamma: float,
-) -> np.ndarray:
-    """
-    P(k) = (1 / gamma) exp(-k / gamma)
-
-    This imposes C = 1 / gamma.
-    """
-    return (
-        (1.0 / gamma)
-        * np.exp(
-            -k / gamma
-        )
-    )
-
-
-# ---------------------------------------------------------------------
-# Goodness-of-fit
-# ---------------------------------------------------------------------
+# =====================================================================
+# GOODNESS OF FIT
+# =====================================================================
 
 def calculate_fit_statistics(
     observed: np.ndarray,
     predicted: np.ndarray,
 ) -> tuple[float, float]:
     """
-    Return R-squared and RMSE on empirical PDF values.
+    Return R^2 and RMSE in cumulative-probability space.
     """
+
     residuals = (
         observed
         - predicted
@@ -381,11 +385,14 @@ def calculate_fit_statistics(
     )
 
     if ss_tot > 0:
+
         r_squared = (
             1.0
             - ss_res / ss_tot
         )
+
     else:
+
         r_squared = np.nan
 
     rmse = float(
@@ -402,49 +409,86 @@ def calculate_fit_statistics(
     )
 
 
-# ---------------------------------------------------------------------
-# Fit method 1:
-# free C and gamma
-# ---------------------------------------------------------------------
+# =====================================================================
+# FIT EXPONENTIAL
+# =====================================================================
 
-def fit_free_exponential(
+def fit_exponential_distribution(
     k: np.ndarray,
     probability: np.ndarray,
     mean_degree: float,
 ) -> dict:
     """
-    Fit
+    Fit:
 
-        P(k) = C exp(-k / gamma)
+        P(K >= k) = C * exp(-k / gamma)
 
-    with both C and gamma estimated.
+    with both C and gamma free.
     """
+
+    if len(k) < 2:
+
+        return {
+            "C": np.nan,
+            "gamma": np.nan,
+            "r_squared": np.nan,
+            "rmse": np.nan,
+        }
+
+    # -------------------------------------------------------------
+    # Initial estimates
+    # -------------------------------------------------------------
+
+    initial_gamma = max(
+        float(mean_degree),
+        1e-3,
+    )
+
+    # Since P(K>=1)=1, a C somewhat above 1 is generally sensible.
     initial_C = float(
-        probability.max()
+        np.exp(
+            1.0 / initial_gamma
+        )
     )
 
-    initial_gamma = float(
-        mean_degree
-    )
+    try:
 
-    popt, pcov = curve_fit(
-        exponential_free,
-        k,
-        probability,
-        p0=[
-            initial_C,
-            initial_gamma,
-        ],
-        bounds=(
-            [0.0, 1e-12],
-            [np.inf, np.inf],
-        ),
-        maxfev=100000,
-    )
+        popt, _ = curve_fit(
+            exponential_ccdf,
+            k,
+            probability,
+            p0=[
+                initial_C,
+                initial_gamma,
+            ],
+            bounds=(
+                [
+                    0.0,
+                    1e-12,
+                ],
+                [
+                    np.inf,
+                    np.inf,
+                ],
+            ),
+            maxfev=100000,
+        )
 
-    C, gamma = popt
+        C, gamma = popt
 
-    predicted = exponential_free(
+    except (
+        RuntimeError,
+        ValueError,
+    ):
+
+        return {
+            "C": np.nan,
+            "gamma": np.nan,
+            "r_squared": np.nan,
+            "rmse": np.nan,
+        }
+
+    predicted = exponential_ccdf(
         k,
         C,
         gamma,
@@ -452,8 +496,8 @@ def fit_free_exponential(
 
     r_squared, rmse = (
         calculate_fit_statistics(
-            probability,
-            predicted,
+            observed=probability,
+            predicted=predicted,
         )
     )
 
@@ -465,197 +509,139 @@ def fit_free_exponential(
     }
 
 
-# ---------------------------------------------------------------------
-# Fit method 2:
-# C = 1 / gamma
-# ---------------------------------------------------------------------
+# =====================================================================
+# ANALYZE ONE NETWORK
+# =====================================================================
 
-def fit_paper_exponential(
-    k: np.ndarray,
-    probability: np.ndarray,
-    mean_degree: float,
+def analyze_network(
+    lines: pd.DataFrame,
+    voltage_levels: list[int],
 ) -> dict:
     """
-    Fit the form stated in the comparison paper:
-
-        P(k) = (1 / gamma) exp(-k / gamma)
-
-    Only gamma is fitted.
+    Calculate degrees, cumulative distribution, exponential fit,
+    and basic statistics for one N490 line network.
     """
-    popt, pcov = curve_fit(
-        exponential_paper,
+
+    selected_lines = select_lines_by_voltage(
+        lines=lines,
+        voltage_levels=voltage_levels,
+    )
+
+    degrees = calculate_nodal_degrees(
+        lines=lines,
+        voltage_levels=voltage_levels,
+    )
+
+    (
         k,
+        counts,
         probability,
-        p0=[
-            float(mean_degree)
-        ],
-        bounds=(
-            [1e-12],
-            [np.inf],
-        ),
-        maxfev=100000,
+    ) = calculate_degree_ccdf(
+        degrees
     )
 
-    gamma = float(
-        popt[0]
+    mean_degree = float(
+        np.mean(degrees)
     )
 
-    predicted = exponential_paper(
-        k,
-        gamma,
-    )
-
-    r_squared, rmse = (
-        calculate_fit_statistics(
-            probability,
-            predicted,
-        )
+    fit = fit_exponential_distribution(
+        k=k,
+        probability=probability,
+        mean_degree=mean_degree,
     )
 
     return {
-        "C": float(
-            1.0 / gamma
-        ),
-        "gamma": gamma,
-        "r_squared": r_squared,
-        "rmse": rmse,
+        "degrees": degrees,
+        "k": k,
+        "counts": counts,
+        "probability": probability,
+        "n_nodes": len(degrees),
+        "n_lines": len(selected_lines),
+        "mean_degree": mean_degree,
+        "C": fit["C"],
+        "gamma": fit["gamma"],
+        "r_squared": fit["r_squared"],
+        "rmse": fit["rmse"],
     }
 
-def count_selected_branches(
-    lines: pd.DataFrame,
-    trafos: pd.DataFrame,
-    voltage_levels: list[int],
-    include_transformers: bool,
-) -> tuple[int, int]:
-    """
-    Return number of selected AC lines and transformers.
-    """
-    line_voltage = pd.to_numeric(
-        lines["Vbase"],
-        errors="coerce",
-    )
 
-    line_mask = np.zeros(
-        len(lines),
-        dtype=bool,
-    )
-
-    for voltage_kv in voltage_levels:
-        line_mask |= np.isclose(
-            line_voltage,
-            float(voltage_kv),
-            equal_nan=False,
-        )
-
-    n_lines = int(
-        line_mask.sum()
-    )
-
-    n_trafos = (
-        len(trafos)
-        if include_transformers
-        else 0
-    )
-
-    return n_lines, n_trafos
-
-
-# ---------------------------------------------------------------------
-# Plot
-# ---------------------------------------------------------------------
+# =====================================================================
+# PLOT
+# =====================================================================
 
 def plot_degree_decay(
     case_name: str,
-    k: np.ndarray,
-    counts: np.ndarray,
-    probability: np.ndarray,
-    free_fit: dict,
-    paper_fit: dict,
+    result: dict,
 ) -> None:
     """
-    Plot empirical P(k) together with both exponential fits.
+    Plot empirical cumulative degree distribution and exponential fit.
     """
+
+    k = result["k"]
+    probability = result["probability"]
+
+    C = result["C"]
+    gamma = result["gamma"]
+
     fig, ax = plt.subplots(
-        figsize=(8.5, 5.8)
+        figsize=FIGSIZE
     )
 
     # -------------------------------------------------------------
-    # Empirical distribution
+    # Empirical cumulative distribution
     # -------------------------------------------------------------
-    ax.bar(
-        k,
-        probability,
-        width=0.72,
-        alpha=0.55,
-        label="Observed degree distribution",
-        zorder=2,
-    )
-
-    # -------------------------------------------------------------
-    # Smooth fitted curves
-    # -------------------------------------------------------------
-    k_fit = np.linspace(
-        float(k.min()),
-        float(k.max()),
-        400,
-    )
-
-    free_probability = (
-        exponential_free(
-            k_fit,
-            free_fit["C"],
-            free_fit["gamma"],
-        )
-    )
-
-    paper_probability = (
-        exponential_paper(
-            k_fit,
-            paper_fit["gamma"],
-        )
-    )
 
     ax.plot(
-        k_fit,
-        free_probability,
-        linewidth=2.2,
-        label=(
-            "Free $C$: "
-            rf"$\gamma={free_fit['gamma']:.3f}$"
-        ),
-        zorder=4,
-    )
-
-    ax.plot(
-        k_fit,
-        paper_probability,
-        linestyle="--",
-        linewidth=2.2,
-        label=(
-            r"$C=1/\gamma$: "
-            rf"$\gamma={paper_fit['gamma']:.3f}$"
-        ),
-        zorder=4,
-    )
-
-    # Show empirical points clearly on top of bars.
-    ax.scatter(
         k,
         probability,
-        s=45,
+        "o",
+        markersize=7,
+        label="Observed cumulative distribution",
         zorder=5,
     )
 
     # -------------------------------------------------------------
+    # Fitted curve
+    # -------------------------------------------------------------
+
+    if (
+        np.isfinite(C)
+        and np.isfinite(gamma)
+    ):
+
+        k_fit = np.linspace(
+            float(k.min()),
+            float(k.max()),
+            400,
+        )
+
+        fitted_probability = (
+            exponential_ccdf(
+                k_fit,
+                C,
+                gamma,
+            )
+        )
+
+        ax.plot(
+            k_fit,
+            fitted_probability,
+            linewidth=2.2,
+            label="Exponential fit",
+            zorder=4,
+        )
+
+    # -------------------------------------------------------------
     # Axes
     # -------------------------------------------------------------
+
     ax.set_xlabel(
         "Nodal degree $k$",
         fontsize=BASE_FONTSIZE,
     )
 
     ax.set_ylabel(
-        "Probability $P(k)$",
+        r"Cumulative probability $P(K \geq k)$",
         fontsize=BASE_FONTSIZE,
     )
 
@@ -671,7 +657,8 @@ def plot_degree_decay(
     )
 
     ax.set_ylim(
-        bottom=0
+        0,
+        1.05,
     )
 
     ax.tick_params(
@@ -698,17 +685,23 @@ def plot_degree_decay(
     # -------------------------------------------------------------
     # Fit statistics
     # -------------------------------------------------------------
+
     statistics_text = (
-        "Free $C$\n"
-        rf"$R^2={free_fit['r_squared']:.3f}$"
+        r"$P(K\geq k)=Ce^{-k/\gamma}$"
         "\n"
-        rf"RMSE={free_fit['rmse']:.4f}"
-        "\n\n"
-        r"$C=1/\gamma$"
+        rf"$C={result['C']:.4f}$"
         "\n"
-        rf"$R^2={paper_fit['r_squared']:.3f}$"
+        rf"$\gamma={result['gamma']:.4f}$"
         "\n"
-        rf"RMSE={paper_fit['rmse']:.4f}"
+        rf"$R^2={result['r_squared']:.4f}$"
+        "\n"
+        rf"RMSE={result['rmse']:.4f}"
+        "\n"
+        rf"$\langle k\rangle={result['mean_degree']:.4f}$"
+        "\n"
+        rf"$N={result['n_nodes']}$"
+        "\n"
+        rf"$E={result['n_lines']}$"
     )
 
     ax.text(
@@ -718,7 +711,7 @@ def plot_degree_decay(
         transform=ax.transAxes,
         horizontalalignment="right",
         verticalalignment="top",
-        fontsize=BASE_FONTSIZE * 0.85,
+        fontsize=BASE_FONTSIZE * 0.82,
     )
 
     plt.tight_layout()
@@ -728,15 +721,15 @@ def plot_degree_decay(
         .lower()
         .replace(" ", "_")
     )
-    
+
     output_path = (
         OUTPUT_DIR
-        / f"N490_{safe_name}_degree_exponential_fits.png"
+        / f"N490_{safe_name}_degree_exponential_fit.png"
     )
 
     fig.savefig(
         output_path,
-        dpi=300,
+        dpi=DPI,
         bbox_inches="tight",
     )
 
@@ -748,74 +741,97 @@ def plot_degree_decay(
     )
 
 
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
+# =====================================================================
+# PRINT SUMMARY
+# =====================================================================
+
+def print_summary(
+    summary: pd.DataFrame,
+) -> None:
+    """
+    Print a clean parameter summary.
+    """
+
+    print("\n")
+    print("=" * 112)
+    print(
+        "N490 CUMULATIVE NODE-DEGREE EXPONENTIAL FITS"
+    )
+    print("=" * 112)
+
+    display_columns = [
+        "network",
+        "voltage_levels",
+        "n_nodes",
+        "n_lines",
+        "mean_degree",
+        "C",
+        "gamma",
+        "R2",
+        "RMSE",
+    ]
+
+    print(
+        summary[
+            display_columns
+        ]
+        .round(
+            {
+                "mean_degree": 4,
+                "C": 4,
+                "gamma": 4,
+                "R2": 4,
+                "RMSE": 4,
+            }
+        )
+        .to_string(
+            index=False
+        )
+    )
+
+
+# =====================================================================
+# MAIN
+# =====================================================================
 
 def main() -> None:
+
+    # -----------------------------------------------------------------
+    # Load model
+    # -----------------------------------------------------------------
 
     model = N490(
         year=2018
     )
-    
-    lines = model.line.copy()
-    trafos = model.trafo.copy()
 
     lines = model.line.copy()
+
+    # -----------------------------------------------------------------
+    # Run analysis
+    # -----------------------------------------------------------------
 
     summary_rows = []
     distribution_rows = []
-    
-    
 
-    for case_name, case_config in ANALYSIS_CASES.items():
-    
-        voltage_levels = case_config[
-            "voltage_levels"
-        ]
-    
-        include_transformers = case_config[
-            "include_transformers"
-        ]
-    
-        degrees = calculate_nodal_degrees(
+    for (
+        case_name,
+        voltage_levels,
+    ) in ANALYSIS_CASES.items():
+
+        print("\n")
+        print(
+            f"Analyzing {case_name}"
+        )
+
+        result = analyze_network(
             lines=lines,
-            trafos=trafos,
             voltage_levels=voltage_levels,
-            include_transformers=include_transformers,
         )
-    
-        k, counts, probability = (
-            calculate_degree_pdf(
-                degrees
-            )
-        )
-    
-        mean_degree = float(
-            np.mean(degrees)
-        )
-    
-        free_fit = fit_free_exponential(
-            k=k,
-            probability=probability,
-            mean_degree=mean_degree,
-        )
-    
-        paper_fit = fit_paper_exponential(
-            k=k,
-            probability=probability,
-            mean_degree=mean_degree,
-        )
-        
-        n_lines, n_trafos = (
-        count_selected_branches(
-            lines=lines,
-            trafos=trafos,
-            voltage_levels=voltage_levels,
-            include_transformers=include_transformers,
-        )
-    )
-    
+
+        # ---------------------------------------------------------
+        # Summary row
+        # ---------------------------------------------------------
+
         summary_rows.append(
             {
                 "network": case_name,
@@ -823,87 +839,60 @@ def main() -> None:
                     str(v)
                     for v in voltage_levels
                 ),
-                "include_transformers":
-                    include_transformers,
-    
-                "n_nodes":
-                    len(degrees),
-    
-                "mean_degree":
-                    mean_degree,
-    
-                "gamma_free_C":
-                    free_fit["gamma"],
-    
-                "C_free":
-                    free_fit["C"],
-    
-                "R2_free_C":
-                    free_fit["r_squared"],
-    
-                "RMSE_free_C":
-                    free_fit["rmse"],
-    
-                "gamma_C_equals_1_over_gamma":
-                    paper_fit["gamma"],
-    
-                "C_equals_1_over_gamma":
-                    paper_fit["C"],
-    
-                "R2_C_equals_1_over_gamma":
-                    paper_fit["r_squared"],
-    
-                "RMSE_C_equals_1_over_gamma":
-                    paper_fit["rmse"],
-                    
-                "n_lines": n_lines,
-                "n_transformers": n_trafos,
-                "n_total_branches": n_lines + n_trafos,
+                "n_nodes": result["n_nodes"],
+                "n_lines": result["n_lines"],
+                "mean_degree": result["mean_degree"],
+                "C": result["C"],
+                "gamma": result["gamma"],
+                "R2": result["r_squared"],
+                "RMSE": result["rmse"],
             }
         )
-    
-        for degree, count, prob in zip(
-            k,
-            counts,
+
+        # ---------------------------------------------------------
+        # Distribution rows
+        # ---------------------------------------------------------
+
+        for (
+            degree,
+            count,
             probability,
+        ) in zip(
+            result["k"],
+            result["counts"],
+            result["probability"],
         ):
+
             distribution_rows.append(
                 {
-                    "network":
-                        case_name,
-    
-                    "voltage_levels":
-                        ",".join(
-                            str(v)
-                            for v in voltage_levels
-                        ),
-    
-                    "include_transformers":
-                        include_transformers,
-    
-                    "degree":
-                        int(degree),
-    
-                    "n_nodes":
-                        int(count),
-    
-                    "probability":
-                        float(prob),
+                    "network": case_name,
+                    "voltage_levels": ",".join(
+                        str(v)
+                        for v in voltage_levels
+                    ),
+                    "degree": int(degree),
+                    "n_nodes_degree_or_higher": int(
+                        count
+                    ),
+                    "cumulative_probability": float(
+                        probability
+                    ),
                 }
             )
-    
+
+        # ---------------------------------------------------------
+        # Plot
+        # ---------------------------------------------------------
+
         plot_degree_decay(
             case_name=case_name,
-            k=k,
-            counts=counts,
-            probability=probability,
-            free_fit=free_fit,
-            paper_fit=paper_fit,
+            result=result,
         )
 
     # -----------------------------------------------------------------
     # Tables
     # -----------------------------------------------------------------
+
     summary = pd.DataFrame(
         summary_rows
     )
@@ -912,105 +901,85 @@ def main() -> None:
         distribution_rows
     )
 
-    print("\n")
-    print("=" * 100)
-    print("N490 exponential nodal-degree decay fits")
-    print("=" * 100)
-
-    print(
+    print_summary(
         summary
-        .round(
-            {
-                "mean_degree": 4,
-                "gamma_free_C": 4,
-                "C_free": 4,
-                "R2_free_C": 4,
-                "RMSE_free_C": 4,
-                "gamma_C_equals_1_over_gamma": 4,
-                "C_equals_1_over_gamma": 4,
-                "R2_C_equals_1_over_gamma": 4,
-                "RMSE_C_equals_1_over_gamma": 4,
-            }
-        )
-        .to_string(
-            index=False
-        )
-    )
-
-    # Cleaner comparison table focused on gamma.
-    gamma_summary = summary[
-        [
-            "network",
-            "voltage_levels",
-            "n_nodes",
-            "mean_degree",
-            "gamma_free_C",
-            "gamma_C_equals_1_over_gamma",
-            "R2_free_C",
-            "R2_C_equals_1_over_gamma",
-        ]
-    ].copy()
-
-    print("\n")
-    print("=" * 100)
-    print("Decay-parameter comparison")
-    print("=" * 100)
-
-    print(
-        gamma_summary
-        .round(4)
-        .to_string(
-            index=False
-        )
     )
 
     # -----------------------------------------------------------------
-    # Save
+    # Save results
     # -----------------------------------------------------------------
-    summary.to_csv(
+
+    summary_csv = (
         OUTPUT_DIR
-        / "N490_degree_decay_fit_summary.csv",
-        index=False,
+        / "N490_degree_decay_fit_summary.csv"
     )
 
-    summary.to_pickle(
+    summary_pickle = (
         OUTPUT_DIR
         / "N490_degree_decay_fit_summary.pkl"
     )
 
-    distributions.to_csv(
+    distributions_csv = (
         OUTPUT_DIR
-        / "N490_degree_distributions.csv",
-        index=False,
+        / "N490_degree_distributions.csv"
     )
 
-    distributions.to_pickle(
+    distributions_pickle = (
         OUTPUT_DIR
         / "N490_degree_distributions.pkl"
     )
 
-    print("\nSaved:")
-    print(
-        " ",
-        OUTPUT_DIR
-        / "N490_degree_decay_fit_summary.csv",
-    )
-    print(
-        " ",
-        OUTPUT_DIR
-        / "N490_degree_decay_fit_summary.pkl",
-    )
-    print(
-        " ",
-        OUTPUT_DIR
-        / "N490_degree_distributions.csv",
-    )
-    print(
-        " ",
-        OUTPUT_DIR
-        / "N490_degree_distributions.pkl",
+    summary.to_csv(
+        summary_csv,
+        index=False,
     )
 
+    summary.to_pickle(
+        summary_pickle
+    )
+
+    distributions.to_csv(
+        distributions_csv,
+        index=False,
+    )
+
+    distributions.to_pickle(
+        distributions_pickle
+    )
+
+    # -----------------------------------------------------------------
+    # Final diagnostics
+    # -----------------------------------------------------------------
+
+    print("\n")
+    print("=" * 112)
+    print("OUTPUTS")
+    print("=" * 112)
+
+    print(
+        f"Summary CSV:\n"
+        f"  {summary_csv}"
+    )
+
+    print(
+        f"\nSummary pickle:\n"
+        f"  {summary_pickle}"
+    )
+
+    print(
+        f"\nCumulative distributions CSV:\n"
+        f"  {distributions_csv}"
+    )
+
+    print(
+        f"\nCumulative distributions pickle:\n"
+        f"  {distributions_pickle}"
+    )
+
+
+# =====================================================================
+# ENTRY POINT
+# =====================================================================
 
 if __name__ == "__main__":
     main()
