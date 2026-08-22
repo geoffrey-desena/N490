@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-Estimate N490 sub-transmission exponential-fit parameters
-=========================================================
+Estimate N490 sub-transmission degree-distribution parameters
+using SIMPLE-GRAPH European comparison networks.
 
-Use fitted cumulative node-degree parameters from 15 European
-networks to estimate plausible sub-transmission parameters for N490.
-
-The cumulative degree model is:
+Model
+-----
+All cumulative node-degree distributions are fitted as:
 
     P(K >= k) = C * exp(-k / gamma)
 
@@ -16,84 +15,77 @@ with both C and gamma free.
 
 Method
 ------
-1. Load N490 fits for:
+1. Load the European node-degree fit results.
+
+2. Keep only SIMPLE-GRAPH European results.
+
+3. Load Nordic490 directly and construct simple graphs for:
        220 kV
        300 kV
        380 kV
 
-2. Load European country fits.
+   Parallel lines between the same unordered pair of buses are
+   collapsed to one edge before degree calculation.
 
-3. For each N490 voltage level, identify European voltage layers
-   within +/-10%:
+4. Fit C and gamma for the three simple N490 voltage networks.
 
-       ~220 kV
-       ~300 kV
-       ~380 kV
+5. Match European transmission voltage layers to the N490 layers
+   within +/-10%.
 
-4. Ignore any network with fewer than MIN_NODES nodes.
+6. Ignore networks with fewer than MIN_NODES nodes.
 
-5. Treat every (C, gamma) pair as a point in parameter space.
+7. Treat each fitted (C, gamma) pair as a point in parameter space.
 
-6. Calculate a GLOBAL covariance matrix from all eligible European
-   transmission-layer comparison points.
+8. Calculate one global covariance matrix from the eligible European
+   transmission-layer simple-graph points.
 
-7. Measure similarity to the appropriate N490 voltage-layer point
-   using Mahalanobis distance:
+9. Calculate Mahalanobis distance to the corresponding N490 point:
 
        d^2 = (x - x_N490)^T Sigma^-1 (x - x_N490)
 
-   where:
-
-       x = [C, gamma]
-
-   This explicitly accounts for correlation between C and gamma.
-
-8. Convert Mahalanobis distance to a Gaussian similarity weight:
+10. Convert distance to a Gaussian similarity weight:
 
        w = exp(-d^2 / 2)
 
-9. For each country, average squared Mahalanobis distance across
-   all N490 voltage bands for which it has a suitable comparison
-   layer:
+11. For each country, average squared Mahalanobis distance over its
+    available matching transmission layers:
 
        w_country = exp(-mean(d^2) / 2)
 
-10. Use those country weights to calculate a weighted center of mass
-    of the countries' combined sub-transmission (<200 kV) C-gamma
-    points.
+12. Apply those country weights to the SIMPLE-GRAPH sub-transmission
+    (<200 kV) C-gamma points.
 
-11. Also calculate the ordinary unweighted centroid of the same
-    sub-transmission points for comparison.
+13. Calculate:
+       - unweighted sub-transmission centroid
+       - weighted sub-transmission centroid
+       - difference between them
 
 Outputs
 -------
-Console:
-    - N490 reference parameters
-    - covariance/correlation diagnostics
-    - eligible European comparison points
-    - country similarity weights
-    - unweighted sub-transmission centroid
-    - weighted sub-transmission centroid
-    - difference between the two
-
-Files:
-    euro-comparison/
-        n490-subtransmission-estimate/
+euro-comparison/
+    n490-subtransmission-estimate/
+        simple-graph/
             voltage_comparison_weights.csv
             country_similarity_weights.csv
             weighted_subtransmission_points.csv
             subtransmission_estimate.csv
             subtransmission_estimate.pkl
+            n490_simple_graph_fits.csv
             transmission_parameter_similarity.png
             subtransmission_center_of_mass.png
 """
 
 from pathlib import Path
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from scipy.optimize import curve_fit, OptimizeWarning
+
+from nordic490 import N490
 
 
 # =====================================================================
@@ -113,15 +105,10 @@ EURO_RESULTS_FILE = (
     / "node_degree_fit_summary.pkl"
 )
 
-N490_RESULTS_FILE = (
-    WORKING_DIR
-    / "n490_degree_decay_analysis"
-    / "N490_degree_decay_fit_summary.pkl"
-)
-
 OUTPUT_DIR = (
     EURO_DIR
     / "n490-subtransmission-estimate"
+    / "simple-graph"
 )
 
 OUTPUT_DIR.mkdir(
@@ -154,23 +141,536 @@ DPI = 300
 
 
 # =====================================================================
+# EXPONENTIAL MODEL
+# =====================================================================
+
+def exponential_degree_distribution(
+    k,
+    C,
+    gamma,
+):
+    """
+    Complementary cumulative exponential model:
+
+        P(K >= k) = C * exp(-k / gamma)
+    """
+
+    return (
+        C
+        * np.exp(
+            -k / gamma
+        )
+    )
+
+
+# =====================================================================
+# N490 ENDPOINT DETECTION
+# =====================================================================
+
+def resolve_line_endpoint_columns(
+    lines,
+):
+    """
+    Identify the two endpoint columns in model.line.
+    """
+
+    candidate_pairs = [
+        ("bus0", "bus1"),
+        ("from_bus", "to_bus"),
+        ("from_bus_id", "to_bus_id"),
+        ("fbus", "tbus"),
+        ("from", "to"),
+    ]
+
+    for col0, col1 in candidate_pairs:
+
+        if (
+            col0 in lines.columns
+            and col1 in lines.columns
+        ):
+            return (
+                col0,
+                col1,
+            )
+
+    raise ValueError(
+        "Could not identify N490 line endpoint columns.\n"
+        f"Available columns:\n"
+        f"{lines.columns.tolist()}"
+    )
+
+
+# =====================================================================
+# N490 SIMPLE GRAPH
+# =====================================================================
+
+def select_n490_voltage_lines(
+    lines,
+    voltage,
+):
+    """
+    Select one N490 voltage layer.
+    """
+
+    if "Vbase" not in lines.columns:
+
+        raise ValueError(
+            "model.line does not contain Vbase."
+        )
+
+    voltage_values = pd.to_numeric(
+        lines["Vbase"],
+        errors="coerce",
+    )
+
+    selected = lines.loc[
+        np.isclose(
+            voltage_values,
+            float(voltage),
+            equal_nan=False,
+        )
+    ].copy()
+
+    if selected.empty:
+
+        raise ValueError(
+            f"No N490 lines found at {voltage} kV."
+        )
+
+    return selected
+
+
+def make_n490_simple_graph(
+    lines,
+):
+    """
+    Collapse multiple N490 lines connecting the same unordered
+    pair of buses to one edge.
+    """
+
+    bus0_col, bus1_col = (
+        resolve_line_endpoint_columns(
+            lines
+        )
+    )
+
+    edges = lines[
+        [
+            bus0_col,
+            bus1_col,
+        ]
+    ].dropna().copy()
+
+    # Convert endpoints to strings before sorting.
+    #
+    # This avoids relying on numeric bus IDs while still producing
+    # a stable canonical unordered pair.
+    endpoint_array = np.sort(
+        edges[
+            [
+                bus0_col,
+                bus1_col,
+            ]
+        ]
+        .astype(str)
+        .to_numpy(),
+        axis=1,
+    )
+
+    edges["_node_i"] = (
+        endpoint_array[:, 0]
+    )
+
+    edges["_node_j"] = (
+        endpoint_array[:, 1]
+    )
+
+    simple_edges = (
+        edges
+        .drop_duplicates(
+            subset=[
+                "_node_i",
+                "_node_j",
+            ],
+            keep="first",
+        )
+        .rename(
+            columns={
+                "_node_i": "node_i",
+                "_node_j": "node_j",
+            }
+        )
+        [
+            [
+                "node_i",
+                "node_j",
+            ]
+        ]
+        .reset_index(
+            drop=True
+        )
+    )
+
+    return simple_edges
+
+
+# =====================================================================
+# DEGREE CALCULATION
+# =====================================================================
+
+def calculate_node_degrees(
+    edges,
+):
+    """
+    Calculate degree from a simple edge list.
+    """
+
+    endpoints = pd.concat(
+        [
+            edges["node_i"],
+            edges["node_j"],
+        ],
+        ignore_index=True,
+    )
+
+    return (
+        endpoints
+        .value_counts()
+        .sort_index()
+    )
+
+
+# =====================================================================
+# COMPLEMENTARY CUMULATIVE DISTRIBUTION
+# =====================================================================
+
+def calculate_degree_distribution(
+    degrees,
+):
+    """
+    Calculate:
+
+        P(K >= k)
+
+    from k = 1 through maximum observed degree.
+    """
+
+    if len(degrees) == 0:
+
+        return (
+            np.array([]),
+            np.array([]),
+        )
+
+    max_degree = int(
+        degrees.max()
+    )
+
+    k = np.arange(
+        1,
+        max_degree + 1,
+        dtype=float,
+    )
+
+    probability = np.array(
+        [
+            np.mean(
+                degrees >= degree
+            )
+            for degree in k
+        ],
+        dtype=float,
+    )
+
+    return (
+        k,
+        probability,
+    )
+
+
+# =====================================================================
+# EXPONENTIAL FIT
+# =====================================================================
+
+def fit_exponential_distribution(
+    k,
+    probability,
+):
+    """
+    Fit:
+
+        P(K >= k) = C exp(-k / gamma)
+
+    with free C and gamma.
+    """
+
+    if len(k) < 2:
+
+        return (
+            np.nan,
+            np.nan,
+            np.nan,
+        )
+
+    try:
+
+        # Small networks can produce an OptimizeWarning because
+        # curve_fit cannot estimate parameter covariance. We do not
+        # use that covariance matrix here, so suppress only that
+        # specific warning.
+        with warnings.catch_warnings():
+
+            warnings.simplefilter(
+                "ignore",
+                OptimizeWarning,
+            )
+
+            popt, _ = curve_fit(
+                exponential_degree_distribution,
+                k,
+                probability,
+                p0=[
+                    1.5,
+                    2.0,
+                ],
+                bounds=(
+                    [
+                        0.0,
+                        1e-8,
+                    ],
+                    [
+                        np.inf,
+                        np.inf,
+                    ],
+                ),
+                maxfev=100000,
+            )
+
+        C = float(
+            popt[0]
+        )
+
+        gamma = float(
+            popt[1]
+        )
+
+    except (
+        RuntimeError,
+        ValueError,
+    ):
+
+        return (
+            np.nan,
+            np.nan,
+            np.nan,
+        )
+
+    fitted = (
+        exponential_degree_distribution(
+            k,
+            C,
+            gamma,
+        )
+    )
+
+    ss_res = np.sum(
+        (
+            probability
+            - fitted
+        ) ** 2
+    )
+
+    ss_tot = np.sum(
+        (
+            probability
+            - np.mean(
+                probability
+            )
+        ) ** 2
+    )
+
+    if ss_tot > 0:
+
+        r2 = (
+            1
+            - ss_res / ss_tot
+        )
+
+    else:
+
+        r2 = np.nan
+
+    return (
+        C,
+        gamma,
+        float(r2),
+    )
+
+
+# =====================================================================
+# BUILD N490 SIMPLE-GRAPH TARGETS
+# =====================================================================
+
+def calculate_n490_targets():
+    """
+    Load N490 and calculate simple-graph C-gamma fits for
+    220, 300, and 380 kV.
+    """
+
+    model = N490(
+        year=2018
+    )
+
+    lines = model.line.copy()
+
+    targets = {}
+    rows = []
+
+    for label, voltage in (
+        TARGET_VOLTAGES.items()
+    ):
+
+        complete_lines = (
+            select_n490_voltage_lines(
+                lines,
+                voltage,
+            )
+        )
+
+        simple_edges = (
+            make_n490_simple_graph(
+                complete_lines
+            )
+        )
+
+        degrees = (
+            calculate_node_degrees(
+                simple_edges
+            )
+        )
+
+        (
+            k,
+            probability,
+        ) = (
+            calculate_degree_distribution(
+                degrees
+            )
+        )
+
+        (
+            C,
+            gamma,
+            r2,
+        ) = (
+            fit_exponential_distribution(
+                k,
+                probability,
+            )
+        )
+
+        n_nodes = len(
+            degrees
+        )
+
+        n_complete = len(
+            complete_lines
+        )
+
+        n_simple = len(
+            simple_edges
+        )
+
+        if n_nodes < MIN_NODES:
+
+            raise ValueError(
+                f"N490 {label} has fewer "
+                f"than {MIN_NODES} nodes."
+            )
+
+        targets[label] = {
+            "voltage":
+                voltage,
+
+            "C":
+                C,
+
+            "gamma":
+                gamma,
+
+            "n_nodes":
+                n_nodes,
+
+            "n_edges_complete":
+                n_complete,
+
+            "n_edges_simple":
+                n_simple,
+
+            "edges_removed":
+                n_complete
+                - n_simple,
+
+            "r2":
+                r2,
+        }
+
+        rows.append(
+            {
+                "network":
+                    label,
+
+                "voltage_kv":
+                    voltage,
+
+                "n_nodes":
+                    n_nodes,
+
+                "n_edges_complete":
+                    n_complete,
+
+                "n_edges_simple":
+                    n_simple,
+
+                "edges_removed":
+                    n_complete
+                    - n_simple,
+
+                "C":
+                    C,
+
+                "gamma":
+                    gamma,
+
+                "R2":
+                    r2,
+            }
+        )
+
+    n490_table = pd.DataFrame(
+        rows
+    )
+
+    return (
+        targets,
+        n490_table,
+    )
+
+
+# =====================================================================
 # VOLTAGE LABEL PARSING
 # =====================================================================
 
-def parse_voltage_group(label):
+def parse_voltage_group(
+    label,
+):
     """
-    Extract numerical voltage values from a voltage-group label.
+    Extract numerical voltage values from a European voltage label.
 
-    Examples
-    --------
-    '220 kV'
-        -> [220.0]
-
-    '132–165 kV'
-        -> [132.0, 165.0]
-
-    'All'
-        -> []
+    Examples:
+        220 kV      -> [220]
+        132–165 kV  -> [132, 165]
+        All         -> []
     """
 
     if pd.isna(label):
@@ -192,17 +692,18 @@ def parse_voltage_group(label):
     ]
 
 
-def representative_voltage(label):
+def representative_voltage(
+    label,
+):
     """
-    Return a representative voltage for a voltage-group label.
-
-    A single voltage is returned directly.
-
-    For a range, return the midpoint.
+    Single voltage -> itself.
+    Range -> midpoint.
     """
 
-    values = parse_voltage_group(
-        label
+    values = (
+        parse_voltage_group(
+            label
+        )
     )
 
     if len(values) == 0:
@@ -216,68 +717,50 @@ def representative_voltage(label):
     )
 
 
-def is_subtransmission_group(label):
+def is_subtransmission_group(
+    label,
+):
     """
-    Return True if all voltages represented by the label are <200 kV.
+    True if the voltage group contains only values below 200 kV.
     """
 
-    values = parse_voltage_group(
-        label
+    values = (
+        parse_voltage_group(
+            label
+        )
     )
 
     if len(values) == 0:
         return False
 
-    return max(values) < 200.0
+    return (
+        max(values) < 200
+    )
 
 
 # =====================================================================
-# LOAD DATA
+# LOAD EUROPEAN SIMPLE-GRAPH RESULTS
 # =====================================================================
 
-def load_results():
+def load_european_results():
     """
-    Load European and N490 fitted-parameter results.
+    Load European results and retain only simple-graph rows.
     """
 
     if not EURO_RESULTS_FILE.exists():
 
         raise FileNotFoundError(
-            f"European results not found:\n"
+            "European result file not found:\n"
             f"{EURO_RESULTS_FILE}"
-        )
-
-    if not N490_RESULTS_FILE.exists():
-
-        raise FileNotFoundError(
-            f"N490 results not found:\n"
-            f"{N490_RESULTS_FILE}"
         )
 
     euro = pd.read_pickle(
         EURO_RESULTS_FILE
     )
 
-    n490 = pd.read_pickle(
-        N490_RESULTS_FILE
-    )
-
-    return euro, n490
-
-
-# =====================================================================
-# STANDARDIZE INPUT TABLES
-# =====================================================================
-
-def standardize_euro_results(
-    euro,
-):
-    """
-    Check expected European result columns and add helper columns.
-    """
-
     required = {
         "country",
+        "graph_type",
         "voltage_group",
         "n_nodes",
         "C",
@@ -287,29 +770,54 @@ def standardize_euro_results(
 
     missing = (
         required
-        - set(euro.columns)
+        - set(
+            euro.columns
+        )
     )
 
     if missing:
 
         raise ValueError(
             "European results are missing columns:\n"
-            f"{sorted(missing)}\n\n"
-            f"Available columns:\n"
-            f"{euro.columns.tolist()}"
+            f"{sorted(missing)}"
         )
 
-    euro = euro.copy()
+    # -------------------------------------------------------------
+    # IMPORTANT:
+    # only SIMPLE-GRAPH fitted parameters are retained.
+    # -------------------------------------------------------------
 
-    euro["representative_voltage"] = (
-        euro["voltage_group"]
+    euro = euro.loc[
+        euro["graph_type"]
+        .astype(str)
+        .str.lower()
+        == "simple"
+    ].copy()
+
+    if euro.empty:
+
+        raise ValueError(
+            "No simple-graph rows found in "
+            "European result table."
+        )
+
+    euro[
+        "representative_voltage"
+    ] = (
+        euro[
+            "voltage_group"
+        ]
         .apply(
             representative_voltage
         )
     )
 
-    euro["is_subtransmission"] = (
-        euro["voltage_group"]
+    euro[
+        "is_subtransmission"
+    ] = (
+        euro[
+            "voltage_group"
+        ]
         .apply(
             is_subtransmission_group
         )
@@ -318,108 +826,20 @@ def standardize_euro_results(
     return euro
 
 
-def standardize_n490_results(
-    n490,
-):
-    """
-    Check expected N490 result columns.
-    """
-
-    required = {
-        "network",
-        "n_nodes",
-        "C",
-        "gamma",
-        "R2",
-    }
-
-    missing = (
-        required
-        - set(n490.columns)
-    )
-
-    if missing:
-
-        raise ValueError(
-            "N490 results are missing columns:\n"
-            f"{sorted(missing)}\n\n"
-            f"Available columns:\n"
-            f"{n490.columns.tolist()}"
-        )
-
-    return n490.copy()
-
-
 # =====================================================================
-# N490 REFERENCE POINTS
-# =====================================================================
-
-def get_n490_targets(
-    n490,
-):
-    """
-    Extract the 220, 300, and 380 kV N490 reference fits.
-    """
-
-    targets = {}
-
-    for label, voltage in (
-        TARGET_VOLTAGES.items()
-    ):
-
-        matches = n490.loc[
-            n490["network"] == label
-        ]
-
-        if len(matches) != 1:
-
-            raise ValueError(
-                f"Expected exactly one N490 "
-                f"result for {label}; "
-                f"found {len(matches)}."
-            )
-
-        row = matches.iloc[0]
-
-        if int(row["n_nodes"]) < MIN_NODES:
-
-            raise ValueError(
-                f"N490 {label} has fewer "
-                f"than {MIN_NODES} nodes."
-            )
-
-        targets[label] = {
-            "voltage": voltage,
-            "C": float(row["C"]),
-            "gamma": float(
-                row["gamma"]
-            ),
-            "n_nodes": int(
-                row["n_nodes"]
-            ),
-            "r2": float(
-                row["R2"]
-            ),
-        }
-
-    return targets
-
-
-# =====================================================================
-# BUILD EUROPEAN COMPARISON SET
+# VOLTAGE MATCHING
 # =====================================================================
 
 def assign_voltage_band(
     voltage,
 ):
     """
-    Assign a European voltage layer to an N490 target voltage if
-    it lies within +/- VOLTAGE_TOLERANCE.
-
-    If multiple bands qualify, use the closest relative difference.
+    Match a European voltage layer to one N490 target within +/-10%.
     """
 
-    if not np.isfinite(voltage):
+    if not np.isfinite(
+        voltage
+    ):
         return None
 
     candidates = []
@@ -428,9 +848,13 @@ def assign_voltage_band(
         TARGET_VOLTAGES.items()
     ):
 
-        relative_difference = abs(
-            voltage - target
-        ) / target
+        relative_difference = (
+            abs(
+                voltage
+                - target
+            )
+            / target
+        )
 
         if (
             relative_difference
@@ -452,37 +876,42 @@ def assign_voltage_band(
     return candidates[0][1]
 
 
+# =====================================================================
+# EUROPEAN TRANSMISSION COMPARISON POINTS
+# =====================================================================
+
 def build_comparison_points(
     euro,
 ):
     """
-    Build European transmission-layer comparison points.
-
-    Excludes:
-        - complete-network rows
-        - sub-transmission rows
-        - N < MIN_NODES
-        - voltages outside +/-10% of an N490 target
+    Keep eligible European simple-graph transmission layers.
     """
 
     comparisons = euro.loc[
-        euro["n_nodes"] >= MIN_NODES
+        euro["n_nodes"]
+        >= MIN_NODES
     ].copy()
 
+    # Remove combined sub-transmission rows.
     comparisons = comparisons.loc[
         ~comparisons[
             "is_subtransmission"
         ]
     ].copy()
 
+    # Remove complete-country rows.
     comparisons = comparisons.loc[
         comparisons[
             "voltage_group"
-        ].astype(str).str.lower()
+        ]
+        .astype(str)
+        .str.lower()
         != "all"
     ].copy()
 
-    comparisons["target_band"] = (
+    comparisons[
+        "target_band"
+    ] = (
         comparisons[
             "representative_voltage"
         ]
@@ -494,39 +923,26 @@ def build_comparison_points(
     comparisons = comparisons.loc[
         comparisons[
             "target_band"
-        ].notna()
+        ]
+        .notna()
     ].copy()
 
     return comparisons
 
 
 # =====================================================================
-# GLOBAL COVARIANCE STRUCTURE
+# GLOBAL COVARIANCE
 # =====================================================================
 
 def calculate_global_covariance(
     comparisons,
 ):
     """
-    Calculate the global covariance matrix of C and gamma.
-
-    Returns
-    -------
-    covariance_matrix
-        2x2 covariance matrix.
-
-    inverse_covariance
-        Pseudoinverse of covariance matrix.
-
-        np.linalg.pinv is used rather than inv because strong
-        C-gamma correlation can make the covariance matrix close
-        to singular.
-
-    correlation
-        Pearson correlation between C and gamma.
+    Calculate global covariance structure of simple-graph C-gamma
+    comparison points.
     """
 
-    parameter_values = (
+    values = (
         comparisons[
             [
                 "C",
@@ -538,7 +954,7 @@ def calculate_global_covariance(
     )
 
     covariance_matrix = np.cov(
-        parameter_values,
+        values,
         rowvar=False,
         ddof=1,
     )
@@ -551,7 +967,10 @@ def calculate_global_covariance(
 
     correlation = float(
         comparisons[
-            ["C", "gamma"]
+            [
+                "C",
+                "gamma",
+            ]
         ]
         .corr()
         .loc[
@@ -584,9 +1003,7 @@ def mahalanobis_distance_squared(
     inverse_covariance,
 ):
     """
-    Calculate squared Mahalanobis distance:
-
-        d^2 = delta.T @ Sigma^-1 @ delta
+    Squared Mahalanobis distance.
     """
 
     delta = (
@@ -600,21 +1017,20 @@ def mahalanobis_distance_squared(
         )
     )
 
-    distance_squared = float(
+    d2 = float(
         delta.T
         @ inverse_covariance
         @ delta
     )
 
-    # Numerical noise can occasionally produce a tiny negative value.
     return max(
-        distance_squared,
+        d2,
         0.0,
     )
 
 
 # =====================================================================
-# VOLTAGE-LEVEL WEIGHTS
+# POINT WEIGHTS
 # =====================================================================
 
 def calculate_point_weights(
@@ -623,12 +1039,7 @@ def calculate_point_weights(
     inverse_covariance,
 ):
     """
-    Calculate Mahalanobis distance from each European transmission
-    point to the corresponding N490 target.
-
-    Gaussian point weight:
-
-        w = exp(-d^2 / 2)
+    Calculate simple-graph European-to-N490 similarity weights.
     """
 
     rows = []
@@ -641,9 +1052,11 @@ def calculate_point_weights(
             "target_band"
         ]
 
-        target = n490_targets[
-            target_label
-        ]
+        target = (
+            n490_targets[
+                target_label
+            ]
+        )
 
         point = np.array(
             [
@@ -659,25 +1072,24 @@ def calculate_point_weights(
             ]
         )
 
-        distance_squared = (
+        d2 = (
             mahalanobis_distance_squared(
-                point=point,
-                target=target_point,
-                inverse_covariance=
-                    inverse_covariance,
+                point,
+                target_point,
+                inverse_covariance,
             )
         )
 
         distance = float(
             np.sqrt(
-                distance_squared
+                d2
             )
         )
 
         weight = float(
             np.exp(
                 -0.5
-                * distance_squared
+                * d2
             )
         )
 
@@ -700,10 +1112,14 @@ def calculate_point_weights(
                     target_label,
 
                 "n_nodes":
-                    int(row["n_nodes"]),
+                    int(
+                        row["n_nodes"]
+                    ),
 
                 "C":
-                    float(row["C"]),
+                    float(
+                        row["C"]
+                    ),
 
                 "gamma":
                     float(
@@ -711,7 +1127,9 @@ def calculate_point_weights(
                     ),
 
                 "R2":
-                    float(row["r2"]),
+                    float(
+                        row["r2"]
+                    ),
 
                 "N490_C":
                     target["C"],
@@ -723,7 +1141,7 @@ def calculate_point_weights(
                     distance,
 
                 "mahalanobis_distance_squared":
-                    distance_squared,
+                    d2,
 
                 "point_weight":
                     weight,
@@ -736,26 +1154,42 @@ def calculate_point_weights(
 
 
 # =====================================================================
-# COUNTRY-LEVEL SIMILARITY
+# COUNTRY WEIGHTS
 # =====================================================================
 
 def calculate_country_weights(
     comparison_weights,
 ):
     """
-    Combine voltage-layer similarities into one country similarity.
+    Combine available transmission-layer matches into one weight
+    per country.
 
-    For each country:
+    Similarity component:
 
-        mean_d2 = mean(d_M^2)
+        similarity_weight = exp(-mean(d_M^2) / 2)
 
-        weight = exp(-mean_d2 / 2)
+    Evidence component:
 
-    Averaging squared distance prevents countries with more available
-    comparison layers from being automatically penalized.
+        evidence_factor = sqrt(m / M)
+
+    where:
+        m = number of matching N490 voltage bands for the country
+        M = total number of N490 target voltage bands
+
+    Final weight:
+
+        weight = similarity_weight * evidence_factor
+
+    This prevents a country with only one matching voltage layer
+    from receiving the same evidentiary weight as a country with
+    comparable similarity across multiple voltage layers.
     """
 
     rows = []
+
+    max_matching_layers = len(
+        TARGET_VOLTAGES
+    )
 
     for country, group in (
         comparison_weights.groupby(
@@ -775,11 +1209,49 @@ def calculate_country_weights(
             )
         )
 
-        weight = float(
+        # ---------------------------------------------------------
+        # Similarity component
+        # ---------------------------------------------------------
+
+        similarity_weight = float(
             np.exp(
                 -0.5
                 * mean_d2
             )
+        )
+
+        # ---------------------------------------------------------
+        # Evidence component
+        #
+        # Count distinct matched N490 voltage bands.
+        #
+        # For three target bands:
+        #
+        #   1 match -> sqrt(1/3) = 0.577
+        #   2 match -> sqrt(2/3) = 0.816
+        #   3 match -> 1.000
+        # ---------------------------------------------------------
+
+        n_matching_layers = len(
+            group[
+                "target_band"
+            ].unique()
+        )
+
+        evidence_factor = float(
+            np.sqrt(
+                n_matching_layers
+                / max_matching_layers
+            )
+        )
+
+        # ---------------------------------------------------------
+        # Combined weight
+        # ---------------------------------------------------------
+
+        weight = float(
+            similarity_weight
+            * evidence_factor
         )
 
         bands = ", ".join(
@@ -796,7 +1268,7 @@ def calculate_country_weights(
                     country,
 
                 "n_matching_layers":
-                    len(group),
+                    n_matching_layers,
 
                 "matching_bands":
                     bands,
@@ -807,6 +1279,12 @@ def calculate_country_weights(
                 "rms_mahalanobis_distance":
                     rms_distance,
 
+                "similarity_weight":
+                    similarity_weight,
+
+                "evidence_factor":
+                    evidence_factor,
+
                 "weight":
                     weight,
             }
@@ -815,6 +1293,10 @@ def calculate_country_weights(
     result = pd.DataFrame(
         rows
     )
+
+    # -------------------------------------------------------------
+    # Normalize final weights
+    # -------------------------------------------------------------
 
     result[
         "normalized_weight"
@@ -836,7 +1318,7 @@ def calculate_country_weights(
 
 
 # =====================================================================
-# SUB-TRANSMISSION POINTS
+# SIMPLE-GRAPH SUB-TRANSMISSION POINTS
 # =====================================================================
 
 def get_subtransmission_points(
@@ -844,8 +1326,7 @@ def get_subtransmission_points(
     country_weights,
 ):
     """
-    Extract each country's combined <200 kV parameter point and
-    attach its country similarity weight.
+    Extract each country's SIMPLE-GRAPH combined <200 kV fit.
     """
 
     sub = euro.loc[
@@ -854,7 +1335,8 @@ def get_subtransmission_points(
                 "is_subtransmission"
             ]
         )
-        & (
+        &
+        (
             euro["n_nodes"]
             >= MIN_NODES
         )
@@ -867,15 +1349,17 @@ def get_subtransmission_points(
         .size()
     )
 
-    duplicates = counts[
+    duplicates = counts.loc[
         counts > 1
     ]
 
-    if len(duplicates) > 0:
+    if len(
+        duplicates
+    ) > 0:
 
         raise ValueError(
-            "More than one sub-transmission "
-            "group found for:\n"
+            "More than one simple-graph "
+            "sub-transmission group found for:\n"
             f"{duplicates}"
         )
 
@@ -890,8 +1374,8 @@ def get_subtransmission_points(
         how="inner",
     )
 
-    # Re-normalize after restricting to countries with valid
-    # sub-transmission fits.
+    # Re-normalize weights among countries actually contributing
+    # sub-transmission points.
     sub[
         "normalized_weight"
     ] = (
@@ -910,20 +1394,16 @@ def calculate_unweighted_centroid(
     sub,
 ):
     """
-    Ordinary arithmetic mean of all eligible sub-transmission points.
+    Arithmetic mean of simple-graph sub-transmission points.
     """
 
-    centroid_C = float(
-        sub["C"].mean()
-    )
-
-    centroid_gamma = float(
-        sub["gamma"].mean()
-    )
-
     return (
-        centroid_C,
-        centroid_gamma,
+        float(
+            sub["C"].mean()
+        ),
+        float(
+            sub["gamma"].mean()
+        ),
     )
 
 
@@ -931,10 +1411,10 @@ def calculate_weighted_centroid(
     sub,
 ):
     """
-    Weighted C-gamma center of mass.
+    Weighted center of mass.
     """
 
-    centroid_C = float(
+    weighted_C = float(
         np.sum(
             sub[
                 "normalized_weight"
@@ -943,7 +1423,7 @@ def calculate_weighted_centroid(
         )
     )
 
-    centroid_gamma = float(
+    weighted_gamma = float(
         np.sum(
             sub[
                 "normalized_weight"
@@ -953,13 +1433,13 @@ def calculate_weighted_centroid(
     )
 
     return (
-        centroid_C,
-        centroid_gamma,
+        weighted_C,
+        weighted_gamma,
     )
 
 
 # =====================================================================
-# PLOT 1: TRANSMISSION PARAMETER SIMILARITY
+# PLOT: TRANSMISSION PARAMETER SPACE
 # =====================================================================
 
 def plot_transmission_similarity(
@@ -967,25 +1447,28 @@ def plot_transmission_similarity(
     n490_targets,
 ):
     """
-    Plot eligible European transmission-layer parameter points.
+    Plot eligible European simple-graph transmission fits.
 
-    Circle size corresponds to point-specific Gaussian weight.
-
-    N490 reference points are stars.
+    Circle size corresponds to point-specific similarity weight.
+    N490 simple-graph points are stars.
     """
 
     fig, ax = plt.subplots(
         figsize=FIGSIZE
     )
 
-    for band in TARGET_VOLTAGES:
+    for band in (
+        TARGET_VOLTAGES
+    ):
 
-        group = comparison_weights.loc[
-            comparison_weights[
-                "target_band"
+        group = (
+            comparison_weights.loc[
+                comparison_weights[
+                    "target_band"
+                ]
+                == band
             ]
-            == band
-        ]
+        )
 
         if group.empty:
             continue
@@ -1009,8 +1492,7 @@ def plot_transmission_similarity(
             edgecolors="black",
             linewidths=0.6,
             label=(
-                f"European "
-                f"{band}"
+                f"European {band}"
             ),
         )
 
@@ -1024,14 +1506,19 @@ def plot_transmission_similarity(
                     row["C"],
                     row["gamma"],
                 ),
-                xytext=(4, 4),
-                textcoords="offset points",
+                xytext=(
+                    4,
+                    4,
+                ),
+                textcoords=(
+                    "offset points"
+                ),
                 fontsize=7,
                 alpha=0.75,
             )
 
     # -------------------------------------------------------------
-    # N490 reference stars
+    # N490 simple-graph stars
     # -------------------------------------------------------------
 
     for band, target in (
@@ -1049,7 +1536,9 @@ def plot_transmission_similarity(
             edgecolors="black",
             linewidths=1.0,
             alpha=0.95,
-            label=f"N490 {band}",
+            label=(
+                f"N490 {band}"
+            ),
             zorder=10,
         )
 
@@ -1062,7 +1551,7 @@ def plot_transmission_similarity(
     )
 
     ax.set_title(
-        "Transmission-network similarity "
+        "Simple-graph transmission similarity "
         "in $C$–$\\gamma$ parameter space"
     )
 
@@ -1072,11 +1561,15 @@ def plot_transmission_similarity(
 
     ax.spines[
         "top"
-    ].set_visible(False)
+    ].set_visible(
+        False
+    )
 
     ax.spines[
         "right"
-    ].set_visible(False)
+    ].set_visible(
+        False
+    )
 
     ax.legend(
         fontsize=8,
@@ -1097,7 +1590,9 @@ def plot_transmission_similarity(
     )
 
     plt.show()
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
     print(
         f"Saved:\n  {output_path}"
@@ -1105,7 +1600,7 @@ def plot_transmission_similarity(
 
 
 # =====================================================================
-# PLOT 2: SUB-TRANSMISSION CENTER OF MASS
+# PLOT: SUB-TRANSMISSION CENTER OF MASS
 # =====================================================================
 
 def plot_subtransmission_center_of_mass(
@@ -1116,13 +1611,8 @@ def plot_subtransmission_center_of_mass(
     weighted_gamma,
 ):
     """
-    Plot country sub-transmission parameter points.
-
-    Circle size corresponds to country similarity weight.
-
-    Show both:
-        - unweighted centroid
-        - Mahalanobis-weighted centroid
+    Plot simple-graph European sub-transmission fits and both
+    centroid estimates.
     """
 
     fig, ax = plt.subplots(
@@ -1147,7 +1637,10 @@ def plot_subtransmission_center_of_mass(
         alpha=0.45,
         edgecolors="black",
         linewidths=0.7,
-        label="Country sub-transmission fits",
+        label=(
+            "Country sub-transmission "
+            "simple-graph fits"
+        ),
     )
 
     for _, row in (
@@ -1160,15 +1653,17 @@ def plot_subtransmission_center_of_mass(
                 row["C"],
                 row["gamma"],
             ),
-            xytext=(5, 5),
-            textcoords="offset points",
+            xytext=(
+                5,
+                5,
+            ),
+            textcoords=(
+                "offset points"
+            ),
             fontsize=8,
         )
 
-    # -------------------------------------------------------------
-    # Unweighted centroid
-    # -------------------------------------------------------------
-
+    # Unweighted
     ax.scatter(
         unweighted_C,
         unweighted_gamma,
@@ -1181,23 +1676,18 @@ def plot_subtransmission_center_of_mass(
         zorder=9,
     )
 
-    # -------------------------------------------------------------
-    # Weighted centroid
-    # -------------------------------------------------------------
-
+    # Weighted
     ax.scatter(
         weighted_C,
         weighted_gamma,
         marker="*",
         s=350,
         color="black",
-        label="Weighted N490 estimate",
+        label=(
+            "Weighted N490 estimate"
+        ),
         zorder=10,
     )
-
-    # -------------------------------------------------------------
-    # Connect the two estimates
-    # -------------------------------------------------------------
 
     ax.plot(
         [
@@ -1222,8 +1712,8 @@ def plot_subtransmission_center_of_mass(
     )
 
     ax.set_title(
-        "Sub-transmission $C$–$\\gamma$ "
-        "centroid comparison"
+        "Simple-graph sub-transmission "
+        "$C$–$\\gamma$ centroid comparison"
     )
 
     ax.grid(
@@ -1232,11 +1722,15 @@ def plot_subtransmission_center_of_mass(
 
     ax.spines[
         "top"
-    ].set_visible(False)
+    ].set_visible(
+        False
+    )
 
     ax.spines[
         "right"
-    ].set_visible(False)
+    ].set_visible(
+        False
+    )
 
     ax.legend()
 
@@ -1254,7 +1748,9 @@ def plot_subtransmission_center_of_mass(
     )
 
     plt.show()
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
     print(
         f"Saved:\n  {output_path}"
@@ -1269,17 +1765,22 @@ def print_n490_targets(
     targets,
 ):
     """
-    Print N490 reference parameters.
+    Print simple-graph N490 reference parameters.
     """
 
     print("\n")
-    print("=" * 90)
-    print("N490 REFERENCE PARAMETERS")
-    print("=" * 90)
+    print("=" * 105)
+    print(
+        "N490 SIMPLE-GRAPH REFERENCE PARAMETERS"
+    )
+    print("=" * 105)
 
     print(
         f"{'Network':<12}"
         f"{'N':>8}"
+        f"{'E original':>12}"
+        f"{'E simple':>12}"
+        f"{'Removed':>10}"
         f"{'C':>12}"
         f"{'gamma':>12}"
         f"{'R2':>12}"
@@ -1292,6 +1793,9 @@ def print_n490_targets(
         print(
             f"{label:<12}"
             f"{values['n_nodes']:>8d}"
+            f"{values['n_edges_complete']:>12d}"
+            f"{values['n_edges_simple']:>12d}"
+            f"{values['edges_removed']:>10d}"
             f"{values['C']:>12.4f}"
             f"{values['gamma']:>12.4f}"
             f"{values['r2']:>12.4f}"
@@ -1302,12 +1806,14 @@ def print_country_weights(
     country_weights,
 ):
     """
-    Print final country similarity weights.
+    Print final country weights.
     """
 
     print("\n")
     print("=" * 115)
-    print("COUNTRY SIMILARITY WEIGHTS")
+    print(
+        "SIMPLE-GRAPH COUNTRY SIMILARITY WEIGHTS"
+    )
     print("=" * 115)
 
     display = country_weights[
@@ -1316,6 +1822,8 @@ def print_country_weights(
             "n_matching_layers",
             "matching_bands",
             "rms_mahalanobis_distance",
+            "similarity_weight",
+            "evidence_factor",
             "weight",
             "normalized_weight",
         ]
@@ -1337,41 +1845,51 @@ def print_country_weights(
 def main():
 
     # -----------------------------------------------------------------
-    # Load results
+    # Load European SIMPLE-GRAPH results
     # -----------------------------------------------------------------
-
-    euro, n490 = (
-        load_results()
-    )
 
     euro = (
-        standardize_euro_results(
-            euro
-        )
+        load_european_results()
     )
 
-    n490 = (
-        standardize_n490_results(
-            n490
-        )
+    print("\n")
+    print("=" * 100)
+    print(
+        "EUROPEAN INPUT"
+    )
+    print("=" * 100)
+
+    print(
+        "Using ONLY graph_type == 'simple'."
+    )
+
+    print(
+        f"Rows loaded: {len(euro)}"
     )
 
     # -----------------------------------------------------------------
-    # N490 targets
+    # Calculate N490 SIMPLE-GRAPH fits
     # -----------------------------------------------------------------
 
-    n490_targets = (
-        get_n490_targets(
-            n490
-        )
+    (
+        n490_targets,
+        n490_table,
+    ) = (
+        calculate_n490_targets()
     )
 
     print_n490_targets(
         n490_targets
     )
 
+    n490_table.to_csv(
+        OUTPUT_DIR
+        / "n490_simple_graph_fits.csv",
+        index=False,
+    )
+
     # -----------------------------------------------------------------
-    # European comparison points
+    # European transmission comparison set
     # -----------------------------------------------------------------
 
     comparisons = (
@@ -1381,9 +1899,11 @@ def main():
     )
 
     print("\n")
-    print("=" * 100)
-    print("ELIGIBLE EUROPEAN COMPARISON POINTS")
-    print("=" * 100)
+    print("=" * 110)
+    print(
+        "ELIGIBLE EUROPEAN SIMPLE-GRAPH COMPARISON POINTS"
+    )
+    print("=" * 110)
 
     print(
         comparisons[
@@ -1405,7 +1925,7 @@ def main():
     )
 
     # -----------------------------------------------------------------
-    # Global covariance structure
+    # Global covariance
     # -----------------------------------------------------------------
 
     (
@@ -1413,13 +1933,17 @@ def main():
         inverse_covariance,
         correlation,
         condition_number,
-    ) = calculate_global_covariance(
-        comparisons
+    ) = (
+        calculate_global_covariance(
+            comparisons
+        )
     )
 
     print("\n")
     print("=" * 100)
-    print("GLOBAL C-GAMMA COVARIANCE STRUCTURE")
+    print(
+        "GLOBAL SIMPLE-GRAPH C-GAMMA COVARIANCE STRUCTURE"
+    )
     print("=" * 100)
 
     covariance_df = pd.DataFrame(
@@ -1457,13 +1981,17 @@ def main():
     )
 
     # -----------------------------------------------------------------
-    # Point-specific Mahalanobis weights
+    # Mahalanobis point weights
     # -----------------------------------------------------------------
 
     comparison_weights = (
         calculate_point_weights(
-            comparisons=comparisons,
-            n490_targets=n490_targets,
+            comparisons=
+                comparisons,
+
+            n490_targets=
+                n490_targets,
+
             inverse_covariance=
                 inverse_covariance,
         )
@@ -1484,19 +2012,21 @@ def main():
     )
 
     # -----------------------------------------------------------------
-    # Sub-transmission points
+    # Simple-graph sub-transmission points
     # -----------------------------------------------------------------
 
     sub = (
         get_subtransmission_points(
-            euro=euro,
+            euro=
+                euro,
+
             country_weights=
                 country_weights,
         )
     )
 
     # -----------------------------------------------------------------
-    # Unweighted centroid
+    # Centroids
     # -----------------------------------------------------------------
 
     (
@@ -1507,10 +2037,6 @@ def main():
             sub
         )
     )
-
-    # -----------------------------------------------------------------
-    # Weighted centroid
-    # -----------------------------------------------------------------
 
     (
         weighted_C,
@@ -1543,20 +2069,22 @@ def main():
     )
 
     percent_shift_C = (
-        100.0
+        100
         * delta_C
         / unweighted_C
     )
 
     percent_shift_gamma = (
-        100.0
+        100
         * delta_gamma
         / unweighted_gamma
     )
 
     print("\n")
     print("=" * 100)
-    print("SUB-TRANSMISSION CENTROID COMPARISON")
+    print(
+        "SIMPLE-GRAPH SUB-TRANSMISSION CENTROID COMPARISON"
+    )
     print("=" * 100)
 
     print(
@@ -1651,6 +2179,9 @@ def main():
     estimate = pd.DataFrame(
         [
             {
+                "graph_type":
+                    "simple",
+
                 "unweighted_C":
                     unweighted_C,
 
@@ -1708,36 +2239,47 @@ def main():
     )
 
     # -----------------------------------------------------------------
-    # Plots
+    # Figures
     # -----------------------------------------------------------------
 
     plot_transmission_similarity(
         comparison_weights=
             comparison_weights,
+
         n490_targets=
             n490_targets,
     )
 
     plot_subtransmission_center_of_mass(
-        sub=sub,
+        sub=
+            sub,
+
         unweighted_C=
             unweighted_C,
+
         unweighted_gamma=
             unweighted_gamma,
+
         weighted_C=
             weighted_C,
+
         weighted_gamma=
             weighted_gamma,
     )
 
     # -----------------------------------------------------------------
-    # Final output paths
+    # Outputs
     # -----------------------------------------------------------------
 
     print("\n")
     print("=" * 100)
     print("OUTPUTS")
     print("=" * 100)
+
+    print(
+        OUTPUT_DIR
+        / "n490_simple_graph_fits.csv"
+    )
 
     print(
         OUTPUT_DIR
