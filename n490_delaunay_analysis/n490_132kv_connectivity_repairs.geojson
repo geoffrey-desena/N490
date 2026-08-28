@@ -1,0 +1,13 @@
+{
+"type": "FeatureCollection",
+"name": "n490_132kv_connectivity_repairs",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 17, "length_km": 16.631939868225754, "repair_iteration": 1, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.504059, 54.717482 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 16, "length_km": 10.628642701527369, "repair_iteration": 2, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.501312, 54.568081 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 4, "to_node": 42, "length_km": 644.54189935757233, "repair_iteration": 3, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 7.338867, 61.206798 ], [ 12.061615, 55.969187 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 3, "to_node": 0, "length_km": 126.14342707818348, "repair_iteration": 4, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 7.033997, 62.47807 ], [ 5.218506, 61.732826 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 5, "to_node": 3, "length_km": 146.25915717679811, "repair_iteration": 5, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 9.602051, 63.058071 ], [ 7.033997, 62.47807 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 63, "to_node": 7, "length_km": 779.58930703987642, "repair_iteration": 6, "edge_source": "connectivity_repair", "edge_set": "Delaunay1" }, "geometry": { "type": "LineString", "coordinates": [ [ 19.24942, 69.183065 ], [ 9.933014, 63.271947 ] ] } }
+]
+}

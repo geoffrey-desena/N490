@@ -35,9 +35,11 @@ branch overlaps a candidate edge when the two connect the same pair of
 voltage-specific geographic nodes. The actual N490 branch may therefore have
 a curved geographic path while the Delaunay candidate is a straight segment.
 
-Parallel N490 branches are retained as separate observations because the
-statistics describe transmission branches rather than unique geographic
-corridors.
+Parallel N490 branches are collapsed to a single edge before calculating
+the overlap statistics. The N490 is therefore treated as a simple graph
+for this analysis. Parallelism is determined after mapping original N490
+bus IDs to voltage-specific geographic nodes, so each unique geographic
+node pair contributes at most one observation.
 
 Outputs
 -------
@@ -640,6 +642,47 @@ def map_n490_lines_to_nodes(
 
     return out
 
+def simplify_n490_edges(
+    n490_edges: gpd.GeoDataFrame,
+    voltage_kv: int,
+) -> gpd.GeoDataFrame:
+    """
+    Convert the mapped N490 voltage network to a simple graph.
+
+    Parallel branches connecting the same pair of voltage-specific
+    geographic nodes are represented by a single edge. This prevents
+    parallel circuits from being counted multiple times in the Delaunay
+    overlap statistics.
+
+    Simplification is performed after mapping original N490 buses to
+    geographic node IDs because the Delaunay candidate sets are defined
+    on those geographic nodes.
+    """
+    out = n490_edges.copy()
+
+    n_complete = len(out)
+
+    # Keep one representative branch for each unordered geographic
+    # node pair.
+    out = (
+        out
+        .drop_duplicates(
+            subset="node_pair",
+            keep="first",
+        )
+        .copy()
+    )
+
+    n_simple = len(out)
+    n_removed = n_complete - n_simple
+
+    print(
+        f"{voltage_kv:g} kV simple-graph conversion: "
+        f"{n_complete} branches -> {n_simple} unique edges "
+        f"({n_removed} parallel branches removed)"
+    )
+
+    return out
 
 # ---------------------------------------------------------------------
 # Classify overlap
@@ -859,7 +902,7 @@ def build_wide_statistics(
 
         row = {
             "Vbase": int(voltage_kv),
-            "Total_Branches": int(total),
+            "Total_Edges": int(total),
             "MST": float(
                 final_props.get(
                     "MST",
@@ -933,7 +976,7 @@ def print_voltage_summary(
     total = len(classified)
 
     print(
-        f"N490 branches:                   {total}"
+        f"N490 simple-graph edges:         {total}"
     )
 
     print("\nFinal mutually exclusive categories")
@@ -1123,6 +1166,18 @@ def main() -> None:
         n490_edges = map_n490_lines_to_nodes(
             n490_lines=n490_lines,
             bus_to_node=bus_to_node,
+            voltage_kv=voltage_kv,
+        )
+        
+        # ---------------------------------------------------------
+        # Convert the actual N490 network to a simple graph.
+        #
+        # Delaunay overlap is defined between geographic node pairs,
+        # so parallel N490 circuits connecting the same pair of
+        # geographic nodes must count as a single observed edge.
+        # ---------------------------------------------------------
+        n490_edges = simplify_n490_edges(
+            n490_edges=n490_edges,
             voltage_kv=voltage_kv,
         )
 
@@ -1419,7 +1474,7 @@ def main() -> None:
 
     def plot_overlap_statistics(
         stats_by_voltage: pd.DataFrame,
-    ) -> tuple[float, float]:
+    ) -> dict:
         """
         Plot overlap proportions by voltage together with a common exponential
         decay fitted to all voltage series.
@@ -1438,11 +1493,15 @@ def main() -> None:
     
         Returns
         -------
-        A:
-            Fitted exponential amplitude.
-        lambda_:
-            Fitted exponential decay parameter.
+        dict
+            Fitted exponential parameters and goodness-of-fit statistics.
         """
+    
+        # -------------------------------------------------------------
+        # Plot formatting
+        # -------------------------------------------------------------
+        TEXT_SIZE = 16
+    
         categories = [
             "MST",
             "Delaunay1",
@@ -1471,6 +1530,13 @@ def main() -> None:
             300: "s",
             380: "^",
         }
+        
+        colors = {
+            132: "#434941",
+            220: "#3d5e30",
+            300: "#d8d11c",
+            380: "#c92931",
+        }
     
         # -------------------------------------------------------------
         # Fit common exponential decay.
@@ -1478,10 +1544,10 @@ def main() -> None:
         fit = fit_overlap_exponential(
             stats_by_voltage
         )
-        
+    
         A = fit["A"]
         lambda_ = fit["lambda"]
-        
+    
         # Smooth x values for plotting the fitted curve.
         x_fit = np.linspace(
             0.0,
@@ -1524,8 +1590,13 @@ def main() -> None:
                     voltage_kv,
                     "o",
                 ),
+                color=colors.get(
+                    voltage_kv,
+                    "#000000",
+                ),
                 markersize=9,
-                linewidth=2.0,
+                linestyle="None",
+                linewidth=0,
                 label=f"{voltage_kv} kV",
             )
     
@@ -1537,43 +1608,67 @@ def main() -> None:
             y_fit,
             linestyle="--",
             linewidth=2.2,
-            color="black",
+            color="#000000",
             label=(
                 "Exponential fit "
                 rf"($\lambda={lambda_:.3f}$)"
             ),
         )
     
+        # -------------------------------------------------------------
+        # Axes formatting.
+        # -------------------------------------------------------------
         ax.set_xticks(x)
     
         ax.set_xticklabels(
-            labels
+            labels,
+            fontsize=TEXT_SIZE,
+            color="#000000",
         )
     
         ax.set_xlabel(
-            "Edge set"
+            "Edge set",
+            fontsize=TEXT_SIZE,
+            color="#000000",
         )
     
         ax.set_ylabel(
-            "Percentage overlap (%)"
-        )
-    
-        ax.set_title(
-            "N490 overlap with voltage-specific Delaunay edge sets"
+            "Percentage overlap (%)",
+            fontsize=TEXT_SIZE,
+            color="#000000",
         )
     
         ax.set_ylim(
             bottom=0
         )
     
-        ax.grid(
-            axis="y",
-            alpha=0.3,
+        # Tick labels and tick marks.
+        ax.tick_params(
+            axis="both",
+            which="both",
+            labelsize=TEXT_SIZE,
+            colors="#000000",
         )
     
-        ax.legend(
-            title="Voltage level"
+        # -------------------------------------------------------------
+        # Axis spines.
+        # -------------------------------------------------------------
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        
+        ax.spines["bottom"].set_color("#000000")
+        ax.spines["left"].set_color("#000000")
+    
+        # -------------------------------------------------------------
+        # Legend.
+        # -------------------------------------------------------------
+        legend = ax.legend(
+            fontsize=TEXT_SIZE,
+            frameon=False,
         )
+    
+        for text in legend.get_texts():
+            text.set_color("#000000")
     
         # -------------------------------------------------------------
         # Display fitted model on the figure.
@@ -1591,15 +1686,18 @@ def main() -> None:
         )
     
         ax.text(
-            0.98,
-            0.72,
+            0.6,
+            0.65,
             fit_text,
             transform=ax.transAxes,
-            horizontalalignment="right",
+            horizontalalignment="left",
             verticalalignment="top",
+            fontsize=TEXT_SIZE,
+            color="#000000",
             bbox={
                 "boxstyle": "round",
                 "facecolor": "white",
+                "edgecolor": "none",
                 "alpha": 0.85,
             },
         )
@@ -1612,48 +1710,48 @@ def main() -> None:
         # -------------------------------------------------------------
         print("\nExponential overlap fit")
         print("-----------------------")
-        
+    
         print(
             "Model:                  "
             "p(k) = A * exp(-lambda * k)"
         )
-        
+    
         print(
             f"A:                      "
             f"{fit['A']:.6f}"
         )
-        
+    
         print(
             f"lambda:                 "
             f"{fit['lambda']:.6f}"
         )
-        
+    
         print(
             f"lambda 95% CI:          "
             f"[{fit['lambda_ci_lower']:.6f}, "
             f"{fit['lambda_ci_upper']:.6f}]"
         )
-        
+    
         print(
             f"R-squared:              "
             f"{fit['r_squared']:.6f}"
         )
-        
+    
         print(
             f"Adjusted R-squared:     "
             f"{fit['adjusted_r_squared']:.6f}"
         )
-        
+    
         print(
             f"RMSE:                   "
             f"{fit['rmse_percentage_points']:.3f} percentage points"
         )
-        
+    
         print(
             f"Observations:           "
             f"{fit['n_observations']}"
         )
-        
+    
         return fit
 
     # -------------------------------------------------------------

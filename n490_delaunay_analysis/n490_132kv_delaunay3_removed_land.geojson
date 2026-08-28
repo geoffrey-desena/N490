@@ -1,0 +1,15 @@
+{
+"type": "FeatureCollection",
+"name": "n490_132kv_delaunay3_removed_land",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 10, "to_node": 12, "length_km": 88.565072699988136, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.089325, 55.66132 ], [ 11.190948, 54.867915 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 12, "to_node": 14, "length_km": 66.183964812417457, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.190948, 54.867915 ], [ 11.348877, 55.455499 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 12, "to_node": 20, "length_km": 46.78402681046029, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.190948, 54.867915 ], [ 11.661987, 54.548173 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 27, "length_km": 68.176673115539202, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.797943, 55.15612 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 29, "length_km": 46.122610063196987, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.851501, 54.929509 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 34, "length_km": 42.236218877256356, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.921539, 54.859221 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 39, "length_km": 36.556412291732563, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.965485, 54.756331 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 22, "length_km": 25.937530464111443, "delaunay_k": 3, "edge_set": "Delaunay3" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.712799, 54.779306 ] ] } }
+]
+}

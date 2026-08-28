@@ -71,7 +71,7 @@ LAND_AREA_PATH = Path(
     "nordic_land_area.geojson"
 )
 
-VOLTAGE_LEVELS = [220, 300, 380]
+VOLTAGE_LEVELS = [132, 220, 300, 380]
 DELAUNAY_K_VALUES = [2, 3, 4, 5]
 
 # ---------------------------------------------------------------------
@@ -233,7 +233,39 @@ def build_voltage_nodes(
             equal_nan=False,
         )
     ].copy()
-
+    
+    # -------------------------------------------------------------
+    # Remove artificial DK2 220 kV transformer-intermediate buses.
+    #
+    # Buses 5520 (Ishøj) and 5524 (Bjæverskov) have no 220 kV line
+    # connections. They exist only as intermediate buses between
+    # transformers and therefore should not participate in the
+    # geographic 220 kV transmission topology.
+    #
+    # Including them in the Delaunay node set forces connectivity
+    # repair / the MST to create implausibly long 220 kV edges.
+    # -------------------------------------------------------------
+    if np.isclose(float(voltage_kv), 220.0):
+        excluded_bus_ids = {
+            5520,  # Ishøj
+            5524,  # Bjæverskov
+        }
+    
+        before = len(buses_work)
+    
+        buses_work = buses_work[
+            ~buses_work["bus_id"].isin(
+                excluded_bus_ids
+            )
+        ].copy()
+    
+        removed = before - len(buses_work)
+    
+        print(
+            f"Excluded {removed} artificial DK2 "
+            "220 kV transformer-intermediate buses."
+        )
+    
     if buses_work.empty:
         raise ValueError(
             f"No N490 buses found at {voltage_kv:g} kV."

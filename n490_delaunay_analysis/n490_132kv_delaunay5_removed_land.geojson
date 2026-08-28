@@ -1,0 +1,21 @@
+{
+"type": "FeatureCollection",
+"name": "n490_132kv_delaunay5_removed_land",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 10, "to_node": 16, "length_km": 124.51275443161936, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.089325, 55.66132 ], [ 11.501312, 54.568081 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 13, "to_node": 20, "length_km": 78.280812581639864, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.295319, 55.21884 ], [ 11.661987, 54.548173 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 14, "to_node": 16, "length_km": 99.271468642252628, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.348877, 55.455499 ], [ 11.501312, 54.568081 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 15, "to_node": 20, "length_km": 79.125058391099998, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.416168, 55.244684 ], [ 11.661987, 54.548173 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 23, "length_km": 84.71341429707455, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.715546, 55.318987 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 32, "length_km": 84.772341469852961, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 11.90094, 55.293974 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 41, "length_km": 93.381408417360703, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 12.024536, 55.351012 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 45, "length_km": 112.11955236853029, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 12.170105, 55.499083 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 16, "to_node": 49, "length_km": 120.79962806614125, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.501312, 54.568081 ], [ 12.268982, 55.559709 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 25, "length_km": 75.719307485179883, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.762238, 55.22589 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 28, "length_km": 79.614370539031782, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.8480685, 55.255251001923504 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 33, "length_km": 51.83398121967835, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.902313, 54.992585 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 35, "length_km": 66.832753979854076, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.932526, 55.127864 ] ] } },
+{ "type": "Feature", "properties": { "voltage_kv": 132.0, "from_node": 20, "to_node": 36, "length_km": 76.927911437247545, "delaunay_k": 5, "edge_set": "Delaunay5" }, "geometry": { "type": "LineString", "coordinates": [ [ 11.661987, 54.548173 ], [ 11.933899, 55.22119 ] ] } }
+]
+}
