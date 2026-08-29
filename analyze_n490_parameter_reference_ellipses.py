@@ -96,6 +96,26 @@ INPUT_FILE = (
     / "euro_n490_node_degree_parameters.pkl"
 )
 
+# =====================================================================
+# DEGREE-DISTRIBUTION OUTPUT
+# =====================================================================
+
+OUTPUT_DIR = (
+    WORKING_DIR
+    / "euro-comparison"
+    / "node-degree-parameter-comparison"
+)
+
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+# Continue calculating explicit degree probabilities until the
+# probability remaining above the largest listed degree is smaller
+# than this value.
+PMF_TAIL_TOLERANCE = 1e-6
+
 
 # =====================================================================
 # SETTINGS
@@ -419,6 +439,272 @@ def build_statistical_summary(parameter_df):
     summary_df = pd.DataFrame(summary_rows)
 
     return summary_df, stats_lookup
+
+# =====================================================================
+# DEGREE PROBABILITIES FROM MEAN A-GAMMA PARAMETERS
+# =====================================================================
+
+def anchored_exponential_ccdf(
+    k,
+    A,
+    gamma,
+):
+    """
+    Anchored exponential complementary cumulative distribution:
+
+        P(K >= 1) = 1
+
+        P(K >= k) =
+            A * exp(-(k - 2) / gamma),   k >= 2
+
+    Thus A = P(K >= 2).
+    """
+
+    k = np.asarray(
+        k,
+        dtype=float,
+    )
+
+    probability = np.ones_like(
+        k,
+        dtype=float,
+    )
+
+    mask = (
+        k >= 2
+    )
+
+    probability[mask] = (
+        A
+        * np.exp(
+            -(k[mask] - 2.0)
+            / gamma
+        )
+    )
+
+    return probability
+
+
+def degree_probability_mass(
+    k,
+    A,
+    gamma,
+):
+    """
+    Calculate P(K = k) from the anchored exponential CCDF.
+
+    Since:
+
+        P(K = k)
+        =
+        P(K >= k) - P(K >= k + 1)
+
+    we obtain:
+
+        P(K = 1) = 1 - A
+
+    and for k >= 2:
+
+        P(K = k)
+        =
+        A * exp(-(k - 2) / gamma)
+          * (1 - exp(-1 / gamma))
+    """
+
+    k = np.asarray(
+        k,
+        dtype=float,
+    )
+
+    ccdf_k = anchored_exponential_ccdf(
+        k,
+        A,
+        gamma,
+    )
+
+    ccdf_next = anchored_exponential_ccdf(
+        k + 1.0,
+        A,
+        gamma,
+    )
+
+    return (
+        ccdf_k
+        - ccdf_next
+    )
+
+
+def build_mean_parameter_degree_distributions(
+    summary_df,
+):
+    """
+    Convert the mean European A-gamma parameters for every graph type
+    and voltage class into ordinary degree probability distributions.
+
+    The explicit distribution is extended until the remaining
+    probability above the largest listed degree is less than
+    PMF_TAIL_TOLERANCE.
+
+    Returns
+    -------
+    pandas.DataFrame
+
+        One row per graph type, voltage class, and degree k.
+    """
+
+    # Mean European parameters are repeated if a voltage class has more
+    # than one N490 comparison row, so retain only one copy of each
+    # European reference distribution.
+    parameter_means = (
+        summary_df[
+            [
+                "graph_type",
+                "voltage_class",
+                "european_n",
+                "mean_A",
+                "mean_gamma",
+            ]
+        ]
+        .drop_duplicates(
+            subset=[
+                "graph_type",
+                "voltage_class",
+            ]
+        )
+        .dropna(
+            subset=[
+                "mean_A",
+                "mean_gamma",
+            ]
+        )
+        .copy()
+    )
+
+    rows = []
+
+    for _, row in parameter_means.iterrows():
+
+        A = float(
+            row["mean_A"]
+        )
+
+        gamma = float(
+            row["mean_gamma"]
+        )
+
+        # ---------------------------------------------------------
+        # Determine a sufficiently large maximum degree.
+        #
+        # We require:
+        #
+        #   P(K >= k_max + 1) < PMF_TAIL_TOLERANCE
+        #
+        # so that essentially all model probability mass appears
+        # explicitly in the saved table.
+        # ---------------------------------------------------------
+
+        k_max = 2
+
+        while (
+            anchored_exponential_ccdf(
+                np.array(
+                    [k_max + 1],
+                    dtype=float,
+                ),
+                A,
+                gamma,
+            )[0]
+            >= PMF_TAIL_TOLERANCE
+        ):
+            k_max += 1
+
+        k_values = np.arange(
+            1,
+            k_max + 1,
+            dtype=int,
+        )
+
+        ccdf = anchored_exponential_ccdf(
+            k_values,
+            A,
+            gamma,
+        )
+
+        probability_mass = degree_probability_mass(
+            k_values,
+            A,
+            gamma,
+        )
+
+        remaining_tail = float(
+            anchored_exponential_ccdf(
+                np.array(
+                    [k_max + 1],
+                    dtype=float,
+                ),
+                A,
+                gamma,
+            )[0]
+        )
+
+        for (
+            degree,
+            cumulative_probability,
+            probability,
+        ) in zip(
+            k_values,
+            ccdf,
+            probability_mass,
+        ):
+
+            rows.append(
+                {
+                    "graph_type":
+                        row["graph_type"],
+
+                    "voltage_class":
+                        row["voltage_class"],
+
+                    "european_n":
+                        int(row["european_n"]),
+
+                    "mean_A":
+                        A,
+
+                    "mean_gamma":
+                        gamma,
+
+                    "degree_k":
+                        int(degree),
+
+                    "ccdf_P_K_ge_k":
+                        float(
+                            cumulative_probability
+                        ),
+
+                    "probability_P_K_eq_k":
+                        float(
+                            probability
+                        ),
+
+                    "percentage_P_K_eq_k":
+                        float(
+                            100.0
+                            * probability
+                        ),
+
+                    "remaining_probability_above_max_k":
+                        (
+                            remaining_tail
+                            if degree == k_max
+                            else np.nan
+                        ),
+                }
+            )
+
+    return pd.DataFrame(
+        rows
+    )
 
 
 # =====================================================================
@@ -774,6 +1060,70 @@ def print_covariance_matrices(parameter_df, stats_lookup):
                 f"     [{covariance[1, 0]: .8f}, {covariance[1, 1]: .8f}]]"
             )
 
+def print_mean_degree_probability_distributions(
+    distribution_df,
+):
+    """
+    Print degree-probability quotas derived from the mean European
+    A-gamma parameters.
+    """
+
+    print("\n")
+    print("=" * 122)
+    print(
+        "DEGREE PROBABILITY DISTRIBUTIONS FROM "
+        "MEAN EUROPEAN A-GAMMA PARAMETERS"
+    )
+    print("=" * 122)
+
+    for graph_type in [
+        "complete",
+        "simple",
+    ]:
+
+        graph_df = distribution_df.loc[
+            distribution_df["graph_type"]
+            == graph_type
+        ]
+
+        if graph_df.empty:
+            continue
+
+        print(
+            f"\n{graph_type.upper()}"
+        )
+
+        # Wide table is easier to interpret as a set of quotas:
+        #
+        #              k=1    k=2    k=3 ...
+        # <200 kV
+        # 200-299 kV
+        # ...
+        wide = (
+            graph_df
+            .pivot(
+                index="voltage_class",
+                columns="degree_k",
+                values="probability_P_K_eq_k",
+            )
+            .reindex(
+                VOLTAGE_CLASS_ORDER
+            )
+        )
+
+        wide.columns = [
+            f"k={int(k)}"
+            for k in wide.columns
+        ]
+
+        print(
+            wide.to_string(
+                float_format=lambda x: (
+                    f"{x:.4f}"
+                ),
+                na_rep="",
+            )
+        )
 
 # =====================================================================
 # MAIN
@@ -798,6 +1148,45 @@ def main():
     )
 
     summary_df, stats_lookup = build_statistical_summary(parameter_df)
+    
+    # -------------------------------------------------------------
+    # Degree probability distributions implied by mean A-gamma
+    # -------------------------------------------------------------
+
+    degree_distribution_df = (
+        build_mean_parameter_degree_distributions(
+            summary_df
+        )
+    )
+
+    print_mean_degree_probability_distributions(
+        degree_distribution_df
+    )
+
+    degree_distribution_csv = (
+        OUTPUT_DIR
+        / "mean_A_gamma_degree_probability_distributions.csv"
+    )
+
+    degree_distribution_pickle = (
+        OUTPUT_DIR
+        / "mean_A_gamma_degree_probability_distributions.pkl"
+    )
+
+    degree_distribution_df.to_csv(
+        degree_distribution_csv,
+        index=False,
+    )
+
+    degree_distribution_df.to_pickle(
+        degree_distribution_pickle
+    )
+
+    print(
+        "\nSaved mean-parameter degree distributions:"
+        f"\n  {degree_distribution_csv}"
+        f"\n  {degree_distribution_pickle}"
+    )
 
     print_reference_distribution_summary(summary_df)
     print_covariance_matrices(parameter_df, stats_lookup)
