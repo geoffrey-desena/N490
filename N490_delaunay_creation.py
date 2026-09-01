@@ -74,6 +74,14 @@ LAND_AREA_PATH = Path(
 VOLTAGE_LEVELS = [132, 220, 300, 380]
 DELAUNAY_K_VALUES = [2, 3, 4, 5]
 
+N490_REFERENCE_DIR = Path(
+    "/Users/geoffreydesena/Documents/nordic-grid/data/raw/n490"
+)
+
+MAX_LINE_LENGTH_REFERENCE_FILENAME = (
+    "N490_max_line_length_by_voltage.pkl"
+)
+
 # ---------------------------------------------------------------------
 # Calculate a limit for the Delaunay connections
 # ---------------------------------------------------------------------
@@ -1474,7 +1482,93 @@ def save_voltage_outputs(
             driver="GeoJSON",
         )
         
+def save_max_line_length_reference(
+    results: dict,
+    output_dir: Path = N490_REFERENCE_DIR,
+) -> pd.DataFrame:
+    """
+    Save the voltage-specific maximum actual N490 AC line lengths.
 
+    The values are the same limits used during the N490 Delaunay analysis:
+    for each voltage level, the longest actual N490 AC line determines the
+    maximum allowed Delaunay candidate length.
+
+    The N490 380 kV level is mapped to the synthetic grid's 400 kV level.
+
+    Parameters
+    ----------
+    results:
+        Voltage-indexed results dictionary created in ``main()``. Each voltage
+        entry must contain ``max_length_km``.
+
+    output_dir:
+        Directory containing the Nordic-grid N490 reference tables.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Reference table with native N490 voltage, model voltage, and maximum
+        line length.
+    """
+    voltage_map = {
+        132: 132,
+        220: 220,
+        300: 300,
+        380: 400,
+    }
+
+    rows = []
+
+    for n490_voltage_kv in VOLTAGE_LEVELS:
+        if n490_voltage_kv not in results:
+            raise ValueError(
+                f"No Delaunay result found for "
+                f"{n490_voltage_kv} kV."
+            )
+
+        max_length_km = float(
+            results[n490_voltage_kv]["max_length_km"]
+        )
+
+        rows.append(
+            {
+                "n490_voltage_kv": int(n490_voltage_kv),
+                "vn_kv": int(voltage_map[n490_voltage_kv]),
+                "max_line_length_km": max_length_km,
+            }
+        )
+
+    reference = (
+        pd.DataFrame(rows)
+        .sort_values("vn_kv")
+        .reset_index(drop=True)
+    )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    pickle_path = (
+        output_dir
+        / MAX_LINE_LENGTH_REFERENCE_FILENAME
+    )
+
+    csv_path = pickle_path.with_suffix(".csv")
+
+    reference.to_pickle(pickle_path)
+    reference.to_csv(
+        csv_path,
+        index=False,
+    )
+
+    print("\nSaved N490 maximum-line-length reference")
+    print("----------------------------------------")
+    print(reference.round(2).to_string(index=False))
+    print(f"\nPickle: {pickle_path}")
+    print(f"CSV:    {csv_path}")
+
+    return reference
 
 # ---------------------------------------------------------------------
 # Main
@@ -1776,6 +1870,7 @@ def main() -> None:
             "max_length_km": max_length_km,
         }
 
+
     # -------------------------------------------------------------
     # Cross-voltage summary
     # -------------------------------------------------------------
@@ -1826,6 +1921,14 @@ def main() -> None:
         OUTPUT_DIR
         / "n490_delaunay_summary_by_voltage.csv",
         index=False,
+    )
+    
+    # -------------------------------------------------------------
+    # Save voltage-specific maximum actual line lengths for use by
+    # the synthetic-grid candidate-line generator.
+    # -------------------------------------------------------------
+    save_max_line_length_reference(
+        results=results,
     )
 
 
