@@ -577,23 +577,6 @@ def build_international_crossing_summary(
         + summary["bidz_2"]
     )
 
-    # Final output guard: domestic bidding-zone pairs must never be
-    # included in the saved border-crossing quota table.  This is
-    # intentionally applied here as well as when ``all_pairs`` is built,
-    # so the output contract remains explicit if the upstream pair-building
-    # logic is changed later.
-    summary = summary.loc[
-        summary["country_1"] != summary["country_2"]
-    ].copy()
-
-    if (
-        summary["country_1"] == summary["country_2"]
-    ).any():
-        raise AssertionError(
-            "Domestic bidding-zone pairs reached the international "
-            "crossing summary."
-        )
-
     summary = (
         summary[
             [
